@@ -10,6 +10,8 @@ target_dir = "/data/webvid/webvid/lineart"  # Replace with your target directory
 # Ensure target directory exists
 os.makedirs(target_dir, exist_ok=True)
 i = 0
+
+
 def generate_canny_images(image_files, processor, target_subfolder):
     # Ensure target subfolder exists
     os.makedirs(target_subfolder, exist_ok=True)
@@ -26,8 +28,9 @@ def generate_canny_images(image_files, processor, target_subfolder):
         save_path = os.path.join(target_subfolder, os.path.basename(image_file))
         processed_image.save(save_path)
 
+
 # Initialize ControlNet Aux processor for Canny edge detection
-processor_id = 'lineart_realistic'
+processor_id = "lineart_realistic"
 processor = Processor(processor_id)
 
 # Process each image sequence in the source directory
@@ -36,7 +39,7 @@ for subdir in os.listdir(source_dir):
     target_subfolder = os.path.join(target_dir, subdir)
 
     if os.path.isdir(image_subfolder) and not os.path.isdir(target_subfolder):
-        image_files = sorted(glob.glob(os.path.join(image_subfolder, '*.png')))  # Assuming images are .png
+        image_files = sorted(glob.glob(os.path.join(image_subfolder, "*.png")))  # Assuming images are .png
 
         # Check if there are exactly 14 images
         if len(image_files) > 10:

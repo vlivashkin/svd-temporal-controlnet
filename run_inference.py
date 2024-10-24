@@ -7,11 +7,13 @@ from pipeline.pipeline_stable_video_diffusion_controlnet import StableVideoDiffu
 from models.controlnet_sdv import ControlNetSDVModel
 from models.unet_spatio_temporal_condition_controlnet import UNetSpatioTemporalConditionControlNetModel
 import cv2
-import re 
+import re
+
 
 def save_gifs_side_by_side(batch_output, validation_images, validation_control_images, output_folder):
     # Helper function to convert tensors to PIL images and save as GIF
     flattened_batch_output = [img for sublist in batch_output for img in sublist]
+
     def create_gif(image_list, gif_path, duration=100):
         pil_images = [validate_and_convert_image(img) for img in image_list]
         pil_images = [img for img in pil_images if img is not None]
@@ -29,10 +31,10 @@ def save_gifs_side_by_side(batch_output, validation_images, validation_control_i
     # Function to combine GIFs side by side
     def combine_gifs_side_by_side(gif_paths, output_path):
         gifs = [Image.open(gif) for gif in gif_paths]
-    
+
         # Find the minimum frame count among all GIFs
         min_frames = min(gif.n_frames for gif in gifs)
-    
+
         frames = []
         for frame_idx in range(min_frames):
             combined_frame = None
@@ -43,13 +45,12 @@ def save_gifs_side_by_side(batch_output, validation_images, validation_control_i
                 else:
                     combined_frame = get_concat_h(combined_frame, gif.copy())
             frames.append(combined_frame)
-    
-        frames[0].save(output_path, save_all=True, append_images=frames[1:], loop=0, duration=gifs[0].info['duration'])
 
+        frames[0].save(output_path, save_all=True, append_images=frames[1:], loop=0, duration=gifs[0].info["duration"])
 
     # Helper function to concatenate images horizontally
     def get_concat_h(im1, im2):
-        dst = Image.new('RGB', (im1.width + im2.width, max(im1.height, im2.height)))
+        dst = Image.new("RGB", (im1.width + im2.width, max(im1.height, im2.height)))
         dst.paste(im1, (0, 0))
         dst.paste(im2, (im1.width, 0))
         return dst
@@ -63,6 +64,7 @@ def save_gifs_side_by_side(batch_output, validation_images, validation_control_i
         os.remove(gif_path)
 
     return combined_gif_path
+
 
 # Define functions
 def validate_and_convert_image(image, target_size=(256, 256)):
@@ -86,8 +88,9 @@ def validate_and_convert_image(image, target_size=(256, 256)):
     else:
         print("Image is not a PIL Image or a PyTorch tensor")
         return None
-    
+
     return image
+
 
 def create_image_grid(images, rows, cols, target_size=(256, 256)):
     valid_images = [validate_and_convert_image(img, target_size) for img in images]
@@ -98,15 +101,16 @@ def create_image_grid(images, rows, cols, target_size=(256, 256)):
         return None
 
     w, h = target_size
-    grid = Image.new('RGB', size=(cols * w, rows * h))
+    grid = Image.new("RGB", size=(cols * w, rows * h))
 
     for i, image in enumerate(valid_images):
         grid.paste(image, box=((i % cols) * w, (i // cols) * h))
 
     return grid
 
+
 def tensor_to_pil(tensor):
-    """ Convert a PyTorch tensor to a PIL Image. """
+    """Convert a PyTorch tensor to a PIL Image."""
     # Convert tensor to numpy array
     if len(tensor.shape) == 4:  # batch of images
         images = [Image.fromarray(img.numpy().transpose(1, 2, 0)) for img in tensor]
@@ -114,19 +118,28 @@ def tensor_to_pil(tensor):
         images = Image.fromarray(tensor.numpy().transpose(1, 2, 0))
     return images
 
+
 def save_combined_frames(batch_output, validation_images, validation_control_images, output_folder):
     # Flatten batch_output to a list of PIL Images
     flattened_batch_output = [img for sublist in batch_output for img in sublist]
 
     # Convert tensors in lists to PIL Images
     validation_images = [tensor_to_pil(img) if torch.is_tensor(img) else img for img in validation_images]
-    validation_control_images = [tensor_to_pil(img) if torch.is_tensor(img) else img for img in validation_control_images]
+    validation_control_images = [
+        tensor_to_pil(img) if torch.is_tensor(img) else img for img in validation_control_images
+    ]
     flattened_batch_output = [tensor_to_pil(img) if torch.is_tensor(img) else img for img in batch_output]
 
     # Flatten lists if they contain sublists (for tensors converted to multiple images)
-    validation_images = [img for sublist in validation_images for img in (sublist if isinstance(sublist, list) else [sublist])]
-    validation_control_images = [img for sublist in validation_control_images for img in (sublist if isinstance(sublist, list) else [sublist])]
-    flattened_batch_output = [img for sublist in flattened_batch_output for img in (sublist if isinstance(sublist, list) else [sublist])]
+    validation_images = [
+        img for sublist in validation_images for img in (sublist if isinstance(sublist, list) else [sublist])
+    ]
+    validation_control_images = [
+        img for sublist in validation_control_images for img in (sublist if isinstance(sublist, list) else [sublist])
+    ]
+    flattened_batch_output = [
+        img for sublist in flattened_batch_output for img in (sublist if isinstance(sublist, list) else [sublist])
+    ]
 
     # Combine frames into a list
     combined_frames = validation_images + validation_control_images + flattened_batch_output
@@ -146,6 +159,7 @@ def save_combined_frames(batch_output, validation_images, validation_control_ima
     else:
         print("Failed to create image grid")
 
+
 def load_images_from_folder(folder):
     images = []
     valid_extensions = {".jpg", ".jpeg", ".png", ".bmp", ".gif", ".tiff"}  # Add or remove extensions as needed
@@ -153,17 +167,17 @@ def load_images_from_folder(folder):
     # Function to extract frame number from the filename
     def frame_number(filename):
         # First, try the pattern 'frame_x_7fps'
-        new_pattern_match = re.search(r'frame_(\d+)_7fps', filename)
+        new_pattern_match = re.search(r"frame_(\d+)_7fps", filename)
         if new_pattern_match:
             return int(new_pattern_match.group(1))
 
         # If the new pattern is not found, use the original digit extraction method
-        matches = re.findall(r'\d+', filename)
+        matches = re.findall(r"\d+", filename)
         if matches:
-            if matches[-1] == '0000' and len(matches) > 1:
+            if matches[-1] == "0000" and len(matches) > 1:
                 return int(matches[-2])  # Return the second-to-last sequence if the last is '0000'
             return int(matches[-1])  # Otherwise, return the last sequence
-        return float('inf')  # Return 'inf'
+        return float("inf")  # Return 'inf'
 
     # Sorting files based on frame number
     sorted_files = sorted(os.listdir(folder), key=frame_number)
@@ -172,10 +186,11 @@ def load_images_from_folder(folder):
     for filename in sorted_files:
         ext = os.path.splitext(filename)[1].lower()
         if ext in valid_extensions:
-            img = Image.open(os.path.join(folder, filename)).convert('RGB')
+            img = Image.open(os.path.join(folder, filename)).convert("RGB")
             images.append(img)
 
     return images
+
 
 def load_images_from_folder_to_pil(folder, target_size=(512, 512)):
     images = []
@@ -183,17 +198,17 @@ def load_images_from_folder_to_pil(folder, target_size=(512, 512)):
 
     def frame_number(filename):
         # Try the pattern 'frame_x_7fps'
-        new_pattern_match = re.search(r'frame_(\d+)_7fps', filename)
+        new_pattern_match = re.search(r"frame_(\d+)_7fps", filename)
         if new_pattern_match:
             return int(new_pattern_match.group(1))
 
         # If the new pattern is not found, use the original digit extraction method
-        matches = re.findall(r'\d+', filename)
+        matches = re.findall(r"\d+", filename)
         if matches:
-            if matches[-1] == '0000' and len(matches) > 1:
+            if matches[-1] == "0000" and len(matches) > 1:
                 return int(matches[-2])  # Return the second-to-last sequence if the last is '0000'
             return int(matches[-1])  # Otherwise, return the last sequence
-        return float('inf')  # Return 'inf'
+        return float("inf")  # Return 'inf'
 
     # Sorting files based on frame number
     sorted_files = sorted(os.listdir(folder), key=frame_number)
@@ -224,6 +239,7 @@ def load_images_from_folder_to_pil(folder, target_size=(512, 512)):
 
     return images
 
+
 # Usage example
 def convert_list_bgra_to_rgba(image_list):
     """
@@ -237,7 +253,7 @@ def convert_list_bgra_to_rgba(image_list):
     """
     rgba_images = []
     for image in image_list:
-        if image.mode == 'RGBA' or image.mode == 'BGRA':
+        if image.mode == "RGBA" or image.mode == "BGRA":
             # Split the image into its components
             b, g, r, a = image.split()
             # Re-merge in RGBA order
@@ -250,6 +266,7 @@ def convert_list_bgra_to_rgba(image_list):
         rgba_images.append(converted_image)
 
     return rgba_images
+
 
 # Main script
 if __name__ == "__main__":
@@ -266,24 +283,38 @@ if __name__ == "__main__":
 
     # Load validation images and control images
     validation_images = load_images_from_folder_to_pil(args["validation_image_folder"])
-    #validation_images = convert_list_bgra_to_rgba(validation_images)
+    # validation_images = convert_list_bgra_to_rgba(validation_images)
     validation_control_images = load_images_from_folder_to_pil(args["validation_control_folder"])
-    validation_image = Image.open(args["validation_image"]).convert('RGB')
-
+    validation_image = Image.open(args["validation_image"]).convert("RGB")
 
     # Load and set up the pipeline
-    controlnet = controlnet = ControlNetSDVModel.from_pretrained("CiaraRowles/temporal-controlnet-depth-svd-v1",subfolder="controlnet")
-    unet = UNetSpatioTemporalConditionControlNetModel.from_pretrained(args["pretrained_model_name_or_path"],subfolder="unet")
-    pipeline = StableVideoDiffusionPipelineControlNet.from_pretrained(args["pretrained_model_name_or_path"],controlnet=controlnet,unet=unet)
+    controlnet = controlnet = ControlNetSDVModel.from_pretrained(
+        "CiaraRowles/temporal-controlnet-depth-svd-v1", subfolder="controlnet"
+    )
+    unet = UNetSpatioTemporalConditionControlNetModel.from_pretrained(
+        args["pretrained_model_name_or_path"], subfolder="unet"
+    )
+    pipeline = StableVideoDiffusionPipelineControlNet.from_pretrained(
+        args["pretrained_model_name_or_path"], controlnet=controlnet, unet=unet
+    )
     pipeline.enable_model_cpu_offload()
     # Additional pipeline configurations can be added here
-    #pipeline.enable_xformers_memory_efficient_attention()
+    # pipeline.enable_xformers_memory_efficient_attention()
     # Create output directory if it doesn't exist
     val_save_dir = os.path.join(args["output_dir"], "validation_images")
     os.makedirs(val_save_dir, exist_ok=True)
 
     # Inference and saving loop
-    #print(validation_control_images.shape)
-    video_frames = pipeline(validation_image, validation_control_images[:14], decode_chunk_size=8,num_frames=14,motion_bucket_id=10,controlnet_cond_scale=1.0,width=512,height=512).frames
+    # print(validation_control_images.shape)
+    video_frames = pipeline(
+        validation_image,
+        validation_control_images[:14],
+        decode_chunk_size=8,
+        num_frames=14,
+        motion_bucket_id=10,
+        controlnet_cond_scale=1.0,
+        width=512,
+        height=512,
+    ).frames
 
-    save_gifs_side_by_side(video_frames,validation_images, validation_control_images,val_save_dir)
+    save_gifs_side_by_side(video_frames, validation_images, validation_control_images, val_save_dir)

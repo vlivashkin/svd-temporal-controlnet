@@ -361,7 +361,7 @@ class UNetSpatioTemporalConditionControlNetModel(ModelMixin, ConfigMixin, UNet2D
         down_block_additional_residuals: Optional[Tuple[torch.Tensor]] = None,
         mid_block_additional_residual: Optional[torch.Tensor] = None,
         return_dict: bool = True,
-        added_time_ids: torch.Tensor=None,
+        added_time_ids: torch.Tensor = None,
     ) -> Union[UNetSpatioTemporalConditionOutput, Tuple]:
         r"""
         The [`UNetSpatioTemporalConditionModel`] forward method.
@@ -458,7 +458,6 @@ class UNetSpatioTemporalConditionControlNetModel(ModelMixin, ConfigMixin, UNet2D
 
             down_block_res_samples = new_down_block_res_samples
 
-        
         # 4. mid
         sample = self.mid_block(
             hidden_states=sample,
@@ -467,7 +466,6 @@ class UNetSpatioTemporalConditionControlNetModel(ModelMixin, ConfigMixin, UNet2D
             image_only_indicator=image_only_indicator,
         )
         sample = sample + mid_block_additional_residual
-
 
         # 5. up
         for i, upsample_block in enumerate(self.up_blocks):

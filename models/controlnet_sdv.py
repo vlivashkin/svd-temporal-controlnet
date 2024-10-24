@@ -28,10 +28,18 @@ from diffusers.models.attention_processor import (
     AttnAddedKVProcessor,
     AttnProcessor,
 )
-from diffusers.models.embeddings import TextImageProjection, TextImageTimeEmbedding, TextTimeEmbedding, TimestepEmbedding, Timesteps
+from diffusers.models.embeddings import (
+    TextImageProjection,
+    TextImageTimeEmbedding,
+    TextTimeEmbedding,
+    TimestepEmbedding,
+    Timesteps,
+)
 from diffusers.models.modeling_utils import ModelMixin
-from diffusers.models.unet_3d_blocks  import (
-    get_down_block, get_up_block,UNetMidBlockSpatioTemporal,
+from diffusers.models.unet_3d_blocks import (
+    get_down_block,
+    get_up_block,
+    UNetMidBlockSpatioTemporal,
 )
 from diffusers.models import UNetSpatioTemporalConditionModel
 
@@ -76,8 +84,6 @@ class ControlNetConditioningEmbeddingSVD(nn.Module):
     ):
         super().__init__()
 
-
-        
         self.conv_in = nn.Conv2d(conditioning_channels, block_out_channels[0], kernel_size=3, padding=1)
 
         self.blocks = nn.ModuleList([])
@@ -93,8 +99,8 @@ class ControlNetConditioningEmbeddingSVD(nn.Module):
         )
 
     def forward(self, conditioning):
-        #this seeems appropriate? idk if i should be applying a more complex setup to handle the frames
-        #combine batch and frames dimensions
+        # this seeems appropriate? idk if i should be applying a more complex setup to handle the frames
+        # combine batch and frames dimensions
         batch_size, frames, channels, height, width = conditioning.size()
         conditioning = conditioning.view(batch_size * frames, channels, height, width)
 
@@ -106,12 +112,11 @@ class ControlNetConditioningEmbeddingSVD(nn.Module):
             embedding = F.silu(embedding)
 
         embedding = self.conv_out(embedding)
-        
-        #split them apart again
-        #actually not needed
-        #new_channels, new_height, new_width = embedding.shape[1], embedding.shape[2], embedding.shape[3]
-        #embedding = embedding.view(batch_size, frames, new_channels, new_height, new_width)
 
+        # split them apart again
+        # actually not needed
+        # new_channels, new_height, new_width = embedding.shape[1], embedding.shape[2], embedding.shape[3]
+        # embedding = embedding.view(batch_size, frames, new_channels, new_height, new_width)
 
         return embedding
 
@@ -180,13 +185,13 @@ class ControlNetSDVModel(ModelMixin, ConfigMixin, FromOriginalControlnetMixin):
         num_attention_heads: Union[int, Tuple[int]] = (5, 10, 10, 20),
         num_frames: int = 25,
         conditioning_channels: int = 3,
-        conditioning_embedding_out_channels : Optional[Tuple[int, ...]] = (16, 32, 96, 256),
+        conditioning_embedding_out_channels: Optional[Tuple[int, ...]] = (16, 32, 96, 256),
     ):
         super().__init__()
         self.sample_size = sample_size
 
         print("layers per block is", layers_per_block)
-        
+
         # Check inputs
         if len(down_block_types) != len(up_block_types):
             raise ValueError(
@@ -260,8 +265,6 @@ class ControlNetSDVModel(ModelMixin, ConfigMixin, FromOriginalControlnetMixin):
         controlnet_block = zero_module(controlnet_block)
         self.controlnet_down_blocks.append(controlnet_block)
 
-        
-        
         for i, down_block_type in enumerate(down_block_types):
             input_channel = output_channel
             output_channel = block_out_channels[i]
@@ -281,7 +284,7 @@ class ControlNetSDVModel(ModelMixin, ConfigMixin, FromOriginalControlnetMixin):
                 resnet_act_fn="silu",
             )
             self.down_blocks.append(down_block)
-            
+
             for _ in range(layers_per_block[i]):
                 controlnet_block = nn.Conv2d(output_channel, output_channel, kernel_size=1)
                 controlnet_block = zero_module(controlnet_block)
@@ -292,14 +295,12 @@ class ControlNetSDVModel(ModelMixin, ConfigMixin, FromOriginalControlnetMixin):
                 controlnet_block = zero_module(controlnet_block)
                 self.controlnet_down_blocks.append(controlnet_block)
 
-
         # mid
         mid_block_channel = block_out_channels[-1]
         controlnet_block = nn.Conv2d(mid_block_channel, mid_block_channel, kernel_size=1)
         controlnet_block = zero_module(controlnet_block)
         self.controlnet_mid_block = controlnet_block
 
-        
         self.mid_block = UNetMidBlockSpatioTemporal(
             block_out_channels[-1],
             temb_channels=blocks_time_embed_dim,
@@ -308,19 +309,16 @@ class ControlNetSDVModel(ModelMixin, ConfigMixin, FromOriginalControlnetMixin):
             num_attention_heads=num_attention_heads[-1],
         )
 
-
-
-
         # out
-        #self.conv_norm_out = nn.GroupNorm(num_channels=block_out_channels[0], num_groups=32, eps=1e-5)
-        #self.conv_act = nn.SiLU()
+        # self.conv_norm_out = nn.GroupNorm(num_channels=block_out_channels[0], num_groups=32, eps=1e-5)
+        # self.conv_act = nn.SiLU()
 
-        #self.conv_out = nn.Conv2d(
+        # self.conv_out = nn.Conv2d(
         #    block_out_channels[0],
         #    out_channels,
         #    kernel_size=3,
         #    padding=1,
-        #)
+        # )
 
     @property
     def attn_processors(self) -> Dict[str, AttentionProcessor]:
@@ -442,8 +440,6 @@ class ControlNetSDVModel(ModelMixin, ConfigMixin, FromOriginalControlnetMixin):
         return_dict: bool = True,
         guess_mode: bool = False,
         conditioning_scale: float = 1.0,
-
-
     ) -> Union[ControlNetOutput, Tuple]:
         r"""
         The [`UNetSpatioTemporalConditionModel`] forward method.
@@ -509,12 +505,11 @@ class ControlNetSDVModel(ModelMixin, ConfigMixin, FromOriginalControlnetMixin):
 
         # 2. pre-process
         sample = self.conv_in(sample)
-        
-        #controlnet cond
+
+        # controlnet cond
         if controlnet_cond != None:
             controlnet_cond = self.controlnet_cond_embedding(controlnet_cond)
             sample = sample + controlnet_cond
-        
 
         image_only_indicator = torch.zeros(batch_size, num_frames, dtype=sample.dtype, device=sample.device)
 
@@ -565,7 +560,6 @@ class ControlNetSDVModel(ModelMixin, ConfigMixin, FromOriginalControlnetMixin):
         return ControlNetOutput(
             down_block_res_samples=down_block_res_samples, mid_block_res_sample=mid_block_res_sample
         )
-    
 
     @classmethod
     def from_unet(
@@ -607,18 +601,18 @@ class ControlNetSDVModel(ModelMixin, ConfigMixin, FromOriginalControlnetMixin):
             sample_size=unet.config.sample_size,  # Added based on the dict
             layers_per_block=unet.config.layers_per_block,
             projection_class_embeddings_input_dim=unet.config.projection_class_embeddings_input_dim,
-            conditioning_channels = conditioning_channels,
-            conditioning_embedding_out_channels = conditioning_embedding_out_channels,
+            conditioning_channels=conditioning_channels,
+            conditioning_embedding_out_channels=conditioning_embedding_out_channels,
         )
-        #controlnet rgb channel order ignored, set to not makea  difference by default
-        
+        # controlnet rgb channel order ignored, set to not makea  difference by default
+
         if load_weights_from_unet:
             controlnet.conv_in.load_state_dict(unet.conv_in.state_dict())
             controlnet.time_proj.load_state_dict(unet.time_proj.state_dict())
             controlnet.time_embedding.load_state_dict(unet.time_embedding.state_dict())
 
-           # if controlnet.class_embedding:
-           #     controlnet.class_embedding.load_state_dict(unet.class_embedding.state_dict())
+            # if controlnet.class_embedding:
+            #     controlnet.class_embedding.load_state_dict(unet.class_embedding.state_dict())
 
             controlnet.down_blocks.load_state_dict(unet.down_blocks.state_dict())
             controlnet.mid_block.load_state_dict(unet.mid_block.state_dict())
@@ -769,11 +763,12 @@ class ControlNetSDVModel(ModelMixin, ConfigMixin, FromOriginalControlnetMixin):
         for module in self.children():
             fn_recursive_set_attention_slice(module, reversed_slice_size)
 
- #   def _set_gradient_checkpointing(self, module, value: bool = False) -> None:
- #       if isinstance(module, (CrossAttnDownBlock2D, DownBlock2D)):
-  #          module.gradient_checkpointing = value
 
-    
+#   def _set_gradient_checkpointing(self, module, value: bool = False) -> None:
+#       if isinstance(module, (CrossAttnDownBlock2D, DownBlock2D)):
+#          module.gradient_checkpointing = value
+
+
 def zero_module(module):
     for p in module.parameters():
         nn.init.zeros_(p)
