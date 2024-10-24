@@ -16,49 +16,42 @@
 
 """Script to fine-tune Stable Video Diffusion."""
 import argparse
-import random
+import datetime
 import logging
 import math
 import os
-import cv2
 import shutil
 from pathlib import Path
 from urllib.parse import urlparse
 
-import accelerate
-import numpy as np
 import PIL
-from PIL import Image, ImageDraw
+import accelerate
+import cv2
+import diffusers
+import numpy as np
 import torch
-import torch.nn.functional as F
 import torch.utils.checkpoint
-from torch.utils.data import RandomSampler
 import transformers
+from PIL import Image
 from accelerate import Accelerator
 from accelerate.logging import get_logger
 from accelerate.utils import ProjectConfiguration, set_seed
-from huggingface_hub import create_repo, upload_folder
-from packaging import version
-from tqdm.auto import tqdm
-from transformers import CLIPImageProcessor, CLIPVisionModelWithProjection
-from einops import rearrange
-
-import datetime
-import diffusers
-from diffusers import StableVideoDiffusionPipeline
-from diffusers.models.lora import LoRALinearLayer
 from diffusers import AutoencoderKLTemporalDecoder, EulerDiscreteScheduler, UNetSpatioTemporalConditionModel
-from diffusers.image_processor import VaeImageProcessor
 from diffusers.optimization import get_scheduler
 from diffusers.training_utils import EMAModel
 from diffusers.utils import check_min_version, deprecate, is_wandb_available, load_image
 from diffusers.utils.import_utils import is_xformers_available
-from utils.dataset import WebVid10M
+from einops import rearrange
+from huggingface_hub import create_repo, upload_folder
+from packaging import version
+from torch.utils.data import RandomSampler
+from tqdm.auto import tqdm
+from transformers import CLIPImageProcessor, CLIPVisionModelWithProjection
+
+from models.controlnet_sdv import ControlNetSDVModel
 from models.unet_spatio_temporal_condition_controlnet import UNetSpatioTemporalConditionControlNetModel
 from pipeline.pipeline_stable_video_diffusion_controlnet import StableVideoDiffusionPipelineControlNet
-from models.controlnet_sdv import ControlNetSDVModel
-
-from torch.utils.data import Dataset
+from utils.dataset import WebVid10M
 
 # Will error if the minimal version of diffusers is not installed. Remove at your own risks.
 check_min_version("0.24.0.dev0")

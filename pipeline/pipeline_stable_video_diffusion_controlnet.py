@@ -16,17 +16,17 @@ import inspect
 from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional, Union
 
-import numpy as np
 import PIL.Image
+import numpy as np
 import torch
-from transformers import CLIPImageProcessor, CLIPVisionModelWithProjection
-from models.controlnet_sdv import ControlNetSDVModel
-
 from diffusers.image_processor import VaeImageProcessor
-from diffusers.models import AutoencoderKLTemporalDecoder, UNetSpatioTemporalConditionModel
+from diffusers.models import AutoencoderKLTemporalDecoder
+from diffusers.pipelines.pipeline_utils import DiffusionPipeline
 from diffusers.utils import BaseOutput, logging
 from diffusers.utils.torch_utils import randn_tensor
-from diffusers.pipelines.pipeline_utils import DiffusionPipeline
+from transformers import CLIPImageProcessor, CLIPVisionModelWithProjection
+
+from models.controlnet_sdv import ControlNetSDVModel
 from models.unet_spatio_temporal_condition_controlnet import UNetSpatioTemporalConditionControlNetModel
 from utils.scheduling_euler_discrete_karras_fix import EulerDiscreteScheduler
 
@@ -596,7 +596,6 @@ class StableVideoDiffusionPipelineControlNet(DiffusionPipeline):
 # resizing utils
 # TODO: clean up later
 def _resize_with_antialiasing(input, size, interpolation="bicubic", align_corners=True):
-
     if input.ndim == 3:
         input = input.unsqueeze(0)  # Add a batch dimension
 

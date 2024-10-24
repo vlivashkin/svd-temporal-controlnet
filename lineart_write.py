@@ -1,5 +1,6 @@
-import os
 import glob
+import os
+
 from PIL import Image
 from controlnet_aux.processor import Processor
 

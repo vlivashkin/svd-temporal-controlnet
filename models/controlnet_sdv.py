@@ -12,15 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Dict, List, Optional, Tuple, Union
 
 import torch
-from torch import nn
-from torch.nn import functional as F
-
 from diffusers.configuration_utils import ConfigMixin, register_to_config
 from diffusers.loaders import FromOriginalControlnetMixin
-from diffusers.utils import BaseOutput, logging
+from diffusers.models import UNetSpatioTemporalConditionModel
 from diffusers.models.attention_processor import (
     ADDED_KV_ATTENTION_PROCESSORS,
     CROSS_ATTENTION_PROCESSORS,
@@ -29,19 +26,17 @@ from diffusers.models.attention_processor import (
     AttnProcessor,
 )
 from diffusers.models.embeddings import (
-    TextImageProjection,
-    TextImageTimeEmbedding,
-    TextTimeEmbedding,
     TimestepEmbedding,
     Timesteps,
 )
 from diffusers.models.modeling_utils import ModelMixin
 from diffusers.models.unet_3d_blocks import (
     get_down_block,
-    get_up_block,
     UNetMidBlockSpatioTemporal,
 )
-from diffusers.models import UNetSpatioTemporalConditionModel
+from diffusers.utils import BaseOutput, logging
+from torch import nn
+from torch.nn import functional as F
 
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
 

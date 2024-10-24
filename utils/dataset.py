@@ -1,17 +1,16 @@
-import os, io, csv, math, random
+import csv
+import os
+import random
+
 import numpy as np
-from einops import rearrange
-
 import torch
-from decord import VideoReader
-import cv2
-
 import torchvision.transforms as transforms
-from torch.utils.data.dataset import Dataset
-from utils.util import zero_rank_print
 
 # from torchvision.io import read_image
 from PIL import Image
+from torch.utils.data.dataset import Dataset
+
+from utils.util import zero_rank_print
 
 
 def pil_image_to_numpy(image):
@@ -132,7 +131,6 @@ class WebVid10M(Dataset):
 
 
 if __name__ == "__main__":
-    from utils.util import save_videos_grid
 
     dataset = WebVid10M(
         csv_path="/data/webvid/results_2M_train.csv",
