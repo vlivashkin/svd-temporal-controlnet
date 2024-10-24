@@ -24,13 +24,14 @@ import accelerate
 import diffusers
 import torch.utils.checkpoint
 import transformers
+import wandb
 from accelerate import Accelerator
 from accelerate.logging import get_logger
 from accelerate.utils import ProjectConfiguration, set_seed
 from diffusers import AutoencoderKLTemporalDecoder, UNetSpatioTemporalConditionModel
 from diffusers.optimization import get_scheduler
 from diffusers.training_utils import EMAModel
-from diffusers.utils import check_min_version, deprecate, is_wandb_available
+from diffusers.utils import check_min_version, deprecate
 from diffusers.utils.import_utils import is_xformers_available
 from huggingface_hub import create_repo, upload_folder
 from packaging import version
@@ -51,57 +52,7 @@ check_min_version("0.24.0.dev0")
 logger = get_logger(__name__, log_level="INFO")
 
 
-def main(args):
-    if args.non_ema_revision is not None:
-        deprecate(
-            "non_ema_revision!=None",
-            "0.15.0",
-            (
-                "Downloading 'non_ema' weights from revision branches of the Hub is deprecated. Please make sure to"
-                " use `--variant=non_ema` instead."
-            ),
-        )
-    logging_dir = os.path.join(args.output_dir, args.logging_dir)
-    accelerator_project_config = ProjectConfiguration(project_dir=args.output_dir, logging_dir=logging_dir)
-    accelerator = Accelerator(
-        gradient_accumulation_steps=args.gradient_accumulation_steps,
-        mixed_precision=args.mixed_precision,
-        project_config=accelerator_project_config,
-    )
-
-    generator = torch.Generator(device=accelerator.device).manual_seed(23123134)
-
-    if args.report_to == "wandb":
-        if not is_wandb_available():
-            raise ImportError("Make sure to install wandb if you want to use it for logging during training.")
-        import wandb
-
-    # Make one log on every process with the configuration for debugging.
-    logging.basicConfig(
-        format="%(asctime)s - %(levelname)s - %(name)s - %(message)s", datefmt="%m/%d/%Y %H:%M:%S", level=logging.INFO
-    )
-    logger.info(accelerator.state, main_process_only=False)
-    if accelerator.is_local_main_process:
-        transformers.utils.logging.set_verbosity_warning()
-        diffusers.utils.logging.set_verbosity_info()
-    else:
-        transformers.utils.logging.set_verbosity_error()
-        diffusers.utils.logging.set_verbosity_error()
-
-    # If passed along, set the training seed now.
-    if args.seed is not None:
-        set_seed(args.seed)
-
-    # Handle the repository creation
-    if accelerator.is_main_process:
-        if args.output_dir is not None:
-            os.makedirs(args.output_dir, exist_ok=True)
-
-        if args.push_to_hub:
-            repo_id = create_repo(
-                repo_id=args.hub_model_id or Path(args.output_dir).name, exist_ok=True, token=args.hub_token
-            ).repo_id
-
+def load_models(args, accelerator):
     # Load scheduler, tokenizer and models.
     feature_extractor = CLIPImageProcessor.from_pretrained(
         args.pretrained_model_name_or_path, subfolder="feature_extractor", revision=args.revision
@@ -200,17 +151,10 @@ def main(args):
     if args.gradient_checkpointing:
         controlnet.enable_gradient_checkpointing()
 
-    # Enable TF32 for faster training on Ampere GPUs,
-    # cf https://pytorch.org/docs/stable/notes/cuda.html#tensorfloat-32-tf32-on-ampere-devices
-    if args.allow_tf32:
-        torch.backends.cuda.matmul.allow_tf32 = True
+    return feature_extractor, image_encoder, vae, unet, controlnet, ema_controlnet, weight_dtype
 
-    if args.scale_lr:
-        args.learning_rate = (
-            args.learning_rate * args.gradient_accumulation_steps * args.per_gpu_batch_size * accelerator.num_processes
-        )
 
-    # Initialize the optimizer
+def load_optimizer(args, controlnet):
     if args.use_8bit_adam:
         try:
             import bitsandbytes as bnb
@@ -223,8 +167,6 @@ def main(args):
     else:
         optimizer_cls = torch.optim.AdamW
 
-    controlnet.requires_grad_(True)
-
     optimizer = optimizer_cls(
         controlnet.parameters(),
         lr=args.learning_rate,
@@ -232,26 +174,72 @@ def main(args):
         weight_decay=args.adam_weight_decay,
         eps=args.adam_epsilon,
     )
+    return optimizer
 
-    # check para
-    if accelerator.is_main_process:
-        rec_txt1 = open("rec_para.txt", "w")
-        rec_txt2 = open("rec_para_train.txt", "w")
-        for name, para in controlnet.named_parameters():
-            if para.requires_grad is False:
-                rec_txt1.write(f"{name}\n")
-            else:
-                rec_txt2.write(f"{name}\n")
-        rec_txt1.close()
-        rec_txt2.close()
-    # DataLoaders creation:
-    args.global_batch_size = args.per_gpu_batch_size * accelerator.num_processes
 
+def load_data(args):
     train_dataset = make_train_dataset(args)
     sampler = RandomSampler(train_dataset, num_samples=100000)
     train_dataloader = torch.utils.data.DataLoader(
         train_dataset, sampler=sampler, batch_size=args.per_gpu_batch_size, num_workers=args.num_workers
     )
+    return train_dataset, train_dataloader
+
+
+def main(args):
+    logging_dir = os.path.join(args.output_dir, args.logging_dir)
+    accelerator_project_config = ProjectConfiguration(project_dir=args.output_dir, logging_dir=logging_dir)
+    accelerator = Accelerator(
+        gradient_accumulation_steps=args.gradient_accumulation_steps,
+        mixed_precision=args.mixed_precision,
+        project_config=accelerator_project_config,
+    )
+    generator = torch.Generator(device=accelerator.device).manual_seed(23123134)
+
+    logging.basicConfig(
+        format="%(asctime)s - %(levelname)s - %(name)s - %(message)s", datefmt="%m/%d/%Y %H:%M:%S", level=logging.INFO
+    )
+    logger.info(accelerator.state, main_process_only=False)
+    if accelerator.is_local_main_process:
+        transformers.utils.logging.set_verbosity_warning()
+        diffusers.utils.logging.set_verbosity_info()
+    else:
+        transformers.utils.logging.set_verbosity_error()
+        diffusers.utils.logging.set_verbosity_error()
+
+    # If passed along, set the training seed now.
+    if args.seed is not None:
+        set_seed(args.seed)
+
+    # Handle the repository creation
+    if accelerator.is_main_process:
+        if args.output_dir is not None:
+            os.makedirs(args.output_dir, exist_ok=True)
+
+        if args.push_to_hub:
+            repo_id = create_repo(
+                repo_id=args.hub_model_id or Path(args.output_dir).name, exist_ok=True, token=args.hub_token
+            ).repo_id
+
+    # Enable TF32 for faster training on Ampere GPUs,
+    # cf https://pytorch.org/docs/stable/notes/cuda.html#tensorfloat-32-tf32-on-ampere-devices
+    if args.allow_tf32:
+        torch.backends.cuda.matmul.allow_tf32 = True
+
+    feature_extractor, image_encoder, vae, unet, controlnet, ema_controlnet, weight_dtype = load_models(
+        args, accelerator
+    )
+    controlnet.requires_grad_(True)
+
+    if args.scale_lr:
+        args.learning_rate = (
+            args.learning_rate * args.gradient_accumulation_steps * args.per_gpu_batch_size * accelerator.num_processes
+        )
+    optimizer = load_optimizer(args, controlnet)
+
+    # DataLoaders creation:
+    args.global_batch_size = args.per_gpu_batch_size * accelerator.num_processes
+    train_dataset, train_dataloader = load_data(args)
 
     # Scheduler and math around the number of training steps.
     overrode_max_train_steps = False
@@ -271,7 +259,6 @@ def main(args):
     unet, optimizer, lr_scheduler, train_dataloader, controlnet = accelerator.prepare(
         unet, optimizer, lr_scheduler, train_dataloader, controlnet
     )
-
     if args.use_ema:
         ema_controlnet.to(accelerator.device)
 
@@ -279,7 +266,6 @@ def main(args):
     num_update_steps_per_epoch = math.ceil(len(train_dataloader) / args.gradient_accumulation_steps)
     if overrode_max_train_steps:
         args.max_train_steps = args.num_train_epochs * num_update_steps_per_epoch
-    # Afterwards we recalculate our number of training epochs
     args.num_train_epochs = math.ceil(args.max_train_steps / num_update_steps_per_epoch)
 
     # We need to initialize the trackers we use, and also store our configuration.
@@ -349,11 +335,7 @@ def main(args):
     progress_bar = tqdm(range(global_step, args.max_train_steps), disable=not accelerator.is_local_main_process)
     progress_bar.set_description("Steps")
 
-    run = wandb.init(
-        project="svd-temporal-controlnet",
-        # config=cfg,
-    )
-
+    wandb.init(project="svd-temporal-controlnet")
     for epoch in range(first_epoch, args.num_train_epochs):
         controlnet.train()
         train_loss = 0.0
@@ -860,13 +842,23 @@ if __name__ == "__main__":
     )
     parser.add_argument("--validation_control_folder", type=str, default=None, help=("the validation control image"))
 
-    args = parser.parse_args()
+    args2 = parser.parse_args()
     env_local_rank = int(os.environ.get("LOCAL_RANK", -1))
-    if env_local_rank != -1 and env_local_rank != args.local_rank:
-        args.local_rank = env_local_rank
+    if env_local_rank != -1 and env_local_rank != args2.local_rank:
+        args2.local_rank = env_local_rank
 
     # default to using the same revision for the non-ema model if not specified
-    if args.non_ema_revision is None:
-        args.non_ema_revision = args.revision
+    if args2.non_ema_revision is None:
+        args2.non_ema_revision = args2.revision
 
-    main(args)
+    if args2.non_ema_revision is not None:
+        deprecate(
+            "non_ema_revision!=None",
+            "0.15.0",
+            (
+                "Downloading 'non_ema' weights from revision branches of the Hub is deprecated. Please make sure to"
+                " use `--variant=non_ema` instead."
+            ),
+        )
+
+    main(args2)

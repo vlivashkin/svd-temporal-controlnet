@@ -20,6 +20,7 @@ imageio = "*"
 #xformers = "*"
 torch = { version = "*" } #, index = "downloadpytorch" }
 torchvision = { version = "*"} #, index = "downloadpytorch" }
+wandb = {extras = ["media"], version = "*"}
 
 [dev-packages]
 black = "*"
