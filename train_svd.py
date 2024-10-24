@@ -51,7 +51,7 @@ from transformers import CLIPImageProcessor, CLIPVisionModelWithProjection
 from models.controlnet_sdv import ControlNetSDVModel
 from models.unet_spatio_temporal_condition_controlnet import UNetSpatioTemporalConditionControlNetModel
 from pipeline.pipeline_stable_video_diffusion_controlnet import StableVideoDiffusionPipelineControlNet
-from utils.dataset import WebVid10M
+from utils.dataset import WebVid10M, CONTEXT_LENGTH
 
 # Will error if the minimal version of diffusers is not installed. Remove at your own risks.
 check_min_version("0.24.0.dev0")
@@ -154,7 +154,7 @@ def load_images_from_folder(folder):
         ext = os.path.splitext(filename)[1].lower()
         if ext in valid_extensions:
             img = Image.open(os.path.join(folder, filename)).convert("RGB")
-            images.append(img)
+            images.append(img.resize((256, 256)))
 
     return images
 
@@ -934,7 +934,7 @@ def main():
     args.global_batch_size = args.per_gpu_batch_size * accelerator.num_processes
 
     train_dataset = make_train_dataset(args)
-    sampler = RandomSampler(train_dataset)
+    sampler = RandomSampler(train_dataset, num_samples=100000)
     train_dataloader = torch.utils.data.DataLoader(
         train_dataset,
         sampler=sampler,
@@ -1082,6 +1082,11 @@ def main():
     # Only show the progress bar once on each machine.
     progress_bar = tqdm(range(global_step, args.max_train_steps), disable=not accelerator.is_local_main_process)
     progress_bar.set_description("Steps")
+
+    run = wandb.init(
+        project="svd-temporal-controlnet",
+        # config=cfg,
+    )
 
     for epoch in range(first_epoch, args.num_train_epochs):
         controlnet.train()
@@ -1237,6 +1242,7 @@ def main():
                 progress_bar.update(1)
                 global_step += 1
                 accelerator.log({"train_loss": train_loss}, step=global_step)
+                wandb.log({"train_loss": train_loss})
                 train_loss = 0.0
 
                 if accelerator.is_main_process:
@@ -1302,7 +1308,7 @@ def main():
                                 num_frames = args.num_frames
                                 video_frames = pipeline(
                                     validation_images[0],
-                                    validation_control_images[:14],
+                                    validation_control_images[:CONTEXT_LENGTH],
                                     height=args.height,
                                     width=args.width,
                                     num_frames=num_frames,
@@ -1324,6 +1330,27 @@ def main():
                                 save_combined_frames(
                                     video_frames, validation_images, validation_control_images, val_save_dir
                                 )
+
+                                flattened_batch_output = [img for sublist in video_frames for img in sublist]
+
+                                a, b, c = (
+                                    np.asarray(validation_images),
+                                    np.asarray(validation_control_images),
+                                    np.asarray(flattened_batch_output),
+                                )
+                                print(a.shape, b.shape, c.shape)
+                                combined_frames = np.concatenate(
+                                    (
+                                        validation_images[:CONTEXT_LENGTH],
+                                        validation_control_images[:CONTEXT_LENGTH],
+                                        flattened_batch_output[:CONTEXT_LENGTH],
+                                    ),
+                                    axis=2,
+                                ).transpose((0, 3, 1, 2))
+                                images = wandb.Video(
+                                    combined_frames, caption=f"step_{global_step}_val_img_{val_img_idx}.mp4"
+                                )
+                                wandb.log({"val_image": images})
 
                                 # export_to_gif(video_frames, out_file, 8)
 

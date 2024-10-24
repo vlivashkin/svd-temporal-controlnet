@@ -1,16 +1,13 @@
-import csv
-import os
+import json
 import random
 
 import numpy as np
 import torch
 import torchvision.transforms as transforms
-
-# from torchvision.io import read_image
 from PIL import Image
 from torch.utils.data.dataset import Dataset
 
-from utils.util import zero_rank_print
+CONTEXT_LENGTH = 14
 
 
 def pil_image_to_numpy(image):
@@ -34,14 +31,13 @@ class WebVid10M(Dataset):
         csv_path,
         video_folder,
         depth_folder,
-        motion_folder,
+        _,
         sample_size=256,
         sample_stride=4,
         sample_n_frames=14,
     ):
-        zero_rank_print(f"loading annotations from {csv_path} ...")
-        with open(csv_path, "r") as csvfile:
-            self.dataset = list(csv.DictReader(csvfile))
+        with open(csv_path) as f:
+            self.dataset = json.load(f)
         self.length = len(self.dataset)
         print(f"data scale: {self.length}")
         random.shuffle(self.dataset)
@@ -49,7 +45,6 @@ class WebVid10M(Dataset):
         self.sample_stride = sample_stride
         self.sample_n_frames = sample_n_frames
         self.depth_folder = depth_folder
-        self.motion_values_folder = motion_folder
         print("length", len(self.dataset))
         sample_size = tuple(sample_size) if not isinstance(sample_size, int) else (sample_size, sample_size)
         print("sample size", sample_size)
@@ -75,40 +70,24 @@ class WebVid10M(Dataset):
 
         while True:
             video_dict = self.dataset[idx]
-            videoid = video_dict["videoid"]
 
-            preprocessed_dir = os.path.join(self.video_folder, videoid)
-            depth_folder = os.path.join(self.depth_folder, videoid)
-            motion_values_file = os.path.join(self.motion_values_folder, videoid, videoid + "_average_motion.txt")
-
-            if not os.path.exists(depth_folder) or not os.path.exists(motion_values_file):
-                idx = random.randint(0, len(self.dataset) - 1)
-                continue
-
-            # Sort and limit the number of image and depth files to 14
-            image_files = sorted(os.listdir(preprocessed_dir), key=sort_frames)[:14]
-            depth_files = sorted(os.listdir(depth_folder), key=sort_frames)[:14]
-
-            # Check if there are enough frames for both image and depth
-            if len(image_files) < 14 or len(depth_files) < 14:
-                idx = random.randint(0, len(self.dataset) - 1)
-                continue
+            start_frame_idx = np.random.randint(low=0, high=len(video_dict["frames"]) - CONTEXT_LENGTH)
+            image_files, depth_files = [], []
+            for idx in range(CONTEXT_LENGTH):
+                frame = video_dict["frames"][start_frame_idx + idx]
+                image_files.append(frame["img_path"])
+                depth_files.append(frame["cond_img_path"])
 
             # Load image frames
-            numpy_images = np.array(
-                [pil_image_to_numpy(Image.open(os.path.join(preprocessed_dir, img))) for img in image_files]
-            )
+            numpy_images = np.array([pil_image_to_numpy(Image.open(img)) for img in image_files])
             pixel_values = numpy_to_pt(numpy_images)
 
             # Load depth frames
-            numpy_depth_images = np.array(
-                [pil_image_to_numpy(Image.open(os.path.join(depth_folder, df))) for df in depth_files]
-            )
+            numpy_depth_images = np.array([pil_image_to_numpy(Image.open(df)) for df in depth_files])
             depth_pixel_values = numpy_to_pt(numpy_depth_images)
 
             # Load motion values
-            with open(motion_values_file, "r") as file:
-                motion_values = float(file.read().strip())
+            motion_values = 0.0
 
             return pixel_values, depth_pixel_values, motion_values
 
@@ -126,30 +105,7 @@ class WebVid10M(Dataset):
         #      idx = random.randint(0, self.length - 1)
 
         pixel_values = self.pixel_transforms(pixel_values)
+        # print(depth_pixel_values.shape)
+        depth_pixel_values = depth_pixel_values[:, :, ::2, ::2]  # FIXME: for 256x256
         sample = dict(pixel_values=pixel_values, depth_pixel_values=depth_pixel_values, motion_values=motion_values)
         return sample
-
-
-if __name__ == "__main__":
-
-    dataset = WebVid10M(
-        csv_path="/data/webvid/results_2M_train.csv",
-        video_folder="/data/webvid/data/videos",
-        sample_size=256,
-        sample_stride=4,
-        sample_n_frames=16,
-        is_image=True,
-    )
-    import pdb
-
-    pdb.set_trace()
-
-    dataloader = torch.utils.data.DataLoader(
-        dataset,
-        batch_size=4,
-        num_workers=16,
-    )
-    for idx, batch in enumerate(dataloader):
-        print(batch["pixel_values"].shape, len(batch["text"]))
-        # for i in range(batch["pixel_values"].shape[0]):
-        #     save_videos_grid(batch["pixel_values"][i:i+1].permute(0,2,1,3,4), os.path.join(".", f"{idx}-{i}.mp4"), rescale=True)
