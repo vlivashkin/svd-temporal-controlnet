@@ -16,32 +16,22 @@
 
 """Script to fine-tune Stable Video Diffusion."""
 import argparse
-import datetime
 import logging
-import math
-import os
 import shutil
 from pathlib import Path
-from urllib.parse import urlparse
 
-import PIL
 import accelerate
-import cv2
 import diffusers
-import numpy as np
-import torch
 import torch.utils.checkpoint
 import transformers
-from PIL import Image
 from accelerate import Accelerator
 from accelerate.logging import get_logger
 from accelerate.utils import ProjectConfiguration, set_seed
-from diffusers import AutoencoderKLTemporalDecoder, EulerDiscreteScheduler, UNetSpatioTemporalConditionModel
+from diffusers import AutoencoderKLTemporalDecoder, UNetSpatioTemporalConditionModel
 from diffusers.optimization import get_scheduler
 from diffusers.training_utils import EMAModel
-from diffusers.utils import check_min_version, deprecate, is_wandb_available, load_image
+from diffusers.utils import check_min_version, deprecate, is_wandb_available
 from diffusers.utils.import_utils import is_xformers_available
-from einops import rearrange
 from huggingface_hub import create_repo, upload_folder
 from packaging import version
 from torch.utils.data import RandomSampler
@@ -51,7 +41,9 @@ from transformers import CLIPImageProcessor, CLIPVisionModelWithProjection
 from models.controlnet_sdv import ControlNetSDVModel
 from models.unet_spatio_temporal_condition_controlnet import UNetSpatioTemporalConditionControlNetModel
 from pipeline.pipeline_stable_video_diffusion_controlnet import StableVideoDiffusionPipelineControlNet
-from utils.dataset import WebVid10M, CONTEXT_LENGTH
+from train_utils import *
+from train_utils import _resize_with_antialiasing, _get_add_time_ids
+from utils.dataset import CONTEXT_LENGTH
 
 # Will error if the minimal version of diffusers is not installed. Remove at your own risks.
 check_min_version("0.24.0.dev0")
@@ -59,681 +51,22 @@ check_min_version("0.24.0.dev0")
 logger = get_logger(__name__, log_level="INFO")
 
 
-# i should make a utility function file
-def validate_and_convert_image(image, target_size=(256, 256)):
-    if image is None:
-        print("Encountered a None image")
-        return None
-
-    if isinstance(image, torch.Tensor):
-        # Convert PyTorch tensor to PIL Image
-        if image.ndim == 3 and image.shape[0] in [1, 3]:  # Check for CxHxW format
-            if image.shape[0] == 1:  # Convert single-channel grayscale to RGB
-                image = image.repeat(3, 1, 1)
-            image = image.mul(255).clamp(0, 255).byte().permute(1, 2, 0).cpu().numpy()
-            image = Image.fromarray(image)
-        else:
-            print(f"Invalid image tensor shape: {image.shape}")
-            return None
-    elif isinstance(image, Image.Image):
-        # Resize PIL Image
-        image = image.resize(target_size)
-    else:
-        print("Image is not a PIL Image or a PyTorch tensor")
-        return None
-
-    return image
-
-
-def create_image_grid(images, rows, cols, target_size=(256, 256)):
-    valid_images = [validate_and_convert_image(img, target_size) for img in images]
-    valid_images = [img for img in valid_images if img is not None]
-
-    if not valid_images:
-        print("No valid images to create a grid")
-        return None
-
-    w, h = target_size
-    grid = Image.new("RGB", size=(cols * w, rows * h))
-
-    for i, image in enumerate(valid_images):
-        grid.paste(image, box=((i % cols) * w, (i // cols) * h))
-
-    return grid
-
-
-def save_combined_frames(batch_output, validation_images, validation_control_images, output_folder):
-    # Flatten batch_output, which is a list of lists of PIL Images
-    flattened_batch_output = [img for sublist in batch_output for img in sublist]
-
-    # Combine frames into a list without converting (since they are already PIL Images)
-    combined_frames = validation_images + validation_control_images + flattened_batch_output
-
-    # Calculate rows and columns for the grid
-    num_images = len(combined_frames)
-    cols = 3  # adjust number of columns as needed
-    rows = (num_images + cols - 1) // cols
-    timestamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
-
-    filename = f"combined_frames_{timestamp}.png"
-    # Create and save the grid image
-    grid = create_image_grid(combined_frames, rows, cols)
-    output_folder = os.path.join(output_folder, "validation_images")
-    os.makedirs(output_folder, exist_ok=True)
-
-    # Now define the full path for the file
-    timestamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
-    filename = f"combined_frames_{timestamp}.png"
-    output_loc = os.path.join(output_folder, filename)
-
-    if grid is not None:
-        grid.save(output_loc)
-    else:
-        print("Failed to create image grid")
-
-
-def load_images_from_folder(folder):
-    images = []
-    valid_extensions = {".jpg", ".jpeg", ".png", ".bmp", ".gif", ".tiff"}  # Add or remove extensions as needed
-
-    # Function to extract frame number from the filename
-    def frame_number(filename):
-        parts = filename.split("_")
-        if len(parts) > 1 and parts[0] == "frame":
-            try:
-                return int(parts[1].split(".")[0])  # Extracting the number part
-            except ValueError:
-                return float("inf")  # In case of non-integer part, place this file at the end
-        return float("inf")  # Non-frame files are placed at the end
-
-    # Sorting files based on frame number
-    sorted_files = sorted(os.listdir(folder), key=frame_number)
-
-    # Load images in sorted order
-    for filename in sorted_files:
-        ext = os.path.splitext(filename)[1].lower()
-        if ext in valid_extensions:
-            img = Image.open(os.path.join(folder, filename)).convert("RGB")
-            images.append(img.resize((256, 256)))
-
-    return images
-
-
-# copy from https://github.com/crowsonkb/k-diffusion.git
-def stratified_uniform(shape, group=0, groups=1, dtype=None, device=None):
-    """Draws stratified samples from a uniform distribution."""
-    if groups <= 0:
-        raise ValueError(f"groups must be positive, got {groups}")
-    if group < 0 or group >= groups:
-        raise ValueError(f"group must be in [0, {groups})")
-    n = shape[-1] * groups
-    offsets = torch.arange(group, n, groups, dtype=dtype, device=device)
-    u = torch.rand(shape, dtype=dtype, device=device)
-    return (offsets + u) / n
-
-
-def rand_cosine_interpolated(
-    shape,
-    image_d,
-    noise_d_low,
-    noise_d_high,
-    sigma_data=1.0,
-    min_value=1e-3,
-    max_value=1e3,
-    device="cpu",
-    dtype=torch.float32,
-):
-    """Draws samples from an interpolated cosine timestep distribution (from simple diffusion)."""
-
-    def logsnr_schedule_cosine(t, logsnr_min, logsnr_max):
-        t_min = math.atan(math.exp(-0.5 * logsnr_max))
-        t_max = math.atan(math.exp(-0.5 * logsnr_min))
-        return -2 * torch.log(torch.tan(t_min + t * (t_max - t_min)))
-
-    def logsnr_schedule_cosine_shifted(t, image_d, noise_d, logsnr_min, logsnr_max):
-        shift = 2 * math.log(noise_d / image_d)
-        return logsnr_schedule_cosine(t, logsnr_min - shift, logsnr_max - shift) + shift
-
-    def logsnr_schedule_cosine_interpolated(t, image_d, noise_d_low, noise_d_high, logsnr_min, logsnr_max):
-        logsnr_low = logsnr_schedule_cosine_shifted(t, image_d, noise_d_low, logsnr_min, logsnr_max)
-        logsnr_high = logsnr_schedule_cosine_shifted(t, image_d, noise_d_high, logsnr_min, logsnr_max)
-        return torch.lerp(logsnr_low, logsnr_high, t)
-
-    logsnr_min = -2 * math.log(min_value / sigma_data)
-    logsnr_max = -2 * math.log(max_value / sigma_data)
-    u = stratified_uniform(shape, group=0, groups=1, dtype=dtype, device=device)
-    logsnr = logsnr_schedule_cosine_interpolated(u, image_d, noise_d_low, noise_d_high, logsnr_min, logsnr_max)
-    return torch.exp(-logsnr / 2) * sigma_data
-
-
-min_value = 0.002
-max_value = 700
-image_d = 64
-noise_d_low = 32
-noise_d_high = 64
-sigma_data = 0.5
-
-
-def make_train_dataset(args):
-    # Get the datasets: you can either provide your own training and evaluation files (see below)
-    # or specify a Dataset from the hub (the dataset will be downloaded automatically from the datasets Hub).
-
-    # In distributed training, the load_dataset function guarantees that only one local process can concurrently
-    # download the dataset.
-    dataset = WebVid10M(args.csv_path, args.video_folder, args.condition_folder, args.motion_folder)
-    return dataset
-
-
-def _resize_with_antialiasing(input, size, interpolation="bicubic", align_corners=True):
-    h, w = input.shape[-2:]
-    factors = (h / size[0], w / size[1])
-
-    # First, we have to determine sigma
-    # Taken from skimage: https://github.com/scikit-image/scikit-image/blob/v0.19.2/skimage/transform/_warps.py#L171
-    sigmas = (
-        max((factors[0] - 1.0) / 2.0, 0.001),
-        max((factors[1] - 1.0) / 2.0, 0.001),
-    )
-
-    # Now kernel size. Good results are for 3 sigma, but that is kind of slow. Pillow uses 1 sigma
-    # https://github.com/python-pillow/Pillow/blob/master/src/libImaging/Resample.c#L206
-    # But they do it in the 2 passes, which gives better results. Let's try 2 sigmas for now
-    ks = int(max(2.0 * 2 * sigmas[0], 3)), int(max(2.0 * 2 * sigmas[1], 3))
-
-    # Make sure it is odd
-    if (ks[0] % 2) == 0:
-        ks = ks[0] + 1, ks[1]
-
-    if (ks[1] % 2) == 0:
-        ks = ks[0], ks[1] + 1
-
-    input = _gaussian_blur2d(input, ks, sigmas)
-
-    output = torch.nn.functional.interpolate(input, size=size, mode=interpolation, align_corners=align_corners)
-    return output
-
-
-def _compute_padding(kernel_size):
-    """Compute padding tuple."""
-    # 4 or 6 ints:  (padding_left, padding_right,padding_top,padding_bottom)
-    # https://pytorch.org/docs/stable/nn.html#torch.nn.functional.pad
-    if len(kernel_size) < 2:
-        raise AssertionError(kernel_size)
-    computed = [k - 1 for k in kernel_size]
-
-    # for even kernels we need to do asymmetric padding :(
-    out_padding = 2 * len(kernel_size) * [0]
-
-    for i in range(len(kernel_size)):
-        computed_tmp = computed[-(i + 1)]
-
-        pad_front = computed_tmp // 2
-        pad_rear = computed_tmp - pad_front
-
-        out_padding[2 * i + 0] = pad_front
-        out_padding[2 * i + 1] = pad_rear
-
-    return out_padding
-
-
-def _filter2d(input, kernel):
-    # prepare kernel
-    b, c, h, w = input.shape
-    tmp_kernel = kernel[:, None, ...].to(device=input.device, dtype=input.dtype)
-
-    tmp_kernel = tmp_kernel.expand(-1, c, -1, -1)
-
-    height, width = tmp_kernel.shape[-2:]
-
-    padding_shape: list[int] = _compute_padding([height, width])
-    input = torch.nn.functional.pad(input, padding_shape, mode="reflect")
-
-    # kernel and input tensor reshape to align element-wise or batch-wise params
-    tmp_kernel = tmp_kernel.reshape(-1, 1, height, width)
-    input = input.view(-1, tmp_kernel.size(0), input.size(-2), input.size(-1))
-
-    # convolve the tensor with the kernel.
-    output = torch.nn.functional.conv2d(input, tmp_kernel, groups=tmp_kernel.size(0), padding=0, stride=1)
-
-    out = output.view(b, c, h, w)
-    return out
-
-
-def _gaussian(window_size: int, sigma):
-    if isinstance(sigma, float):
-        sigma = torch.tensor([[sigma]])
-
-    batch_size = sigma.shape[0]
-
-    x = (torch.arange(window_size, device=sigma.device, dtype=sigma.dtype) - window_size // 2).expand(batch_size, -1)
-
-    if window_size % 2 == 0:
-        x = x + 0.5
-
-    gauss = torch.exp(-x.pow(2.0) / (2 * sigma.pow(2.0)))
-
-    return gauss / gauss.sum(-1, keepdim=True)
-
-
-def _gaussian_blur2d(input, kernel_size, sigma):
-    if isinstance(sigma, tuple):
-        sigma = torch.tensor([sigma], dtype=input.dtype)
-    else:
-        sigma = sigma.to(dtype=input.dtype)
-
-    ky, kx = int(kernel_size[0]), int(kernel_size[1])
-    bs = sigma.shape[0]
-    kernel_x = _gaussian(kx, sigma[:, 1].view(bs, 1))
-    kernel_y = _gaussian(ky, sigma[:, 0].view(bs, 1))
-    out_x = _filter2d(input, kernel_x[..., None, :])
-    out = _filter2d(out_x, kernel_y[..., None])
-
-    return out
-
-
-def export_to_video(video_frames, output_video_path, fps):
-    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-    h, w, _ = video_frames[0].shape
-    video_writer = cv2.VideoWriter(output_video_path, fourcc, fps=fps, frameSize=(w, h))
-    for i in range(len(video_frames)):
-        img = cv2.cvtColor(video_frames[i], cv2.COLOR_RGB2BGR)
-        video_writer.write(img)
-
-
-def export_to_gif(frames, output_gif_path, fps):
-    """
-    Export a list of frames to a GIF.
-
-    Args:
-    - frames (list): List of frames (as numpy arrays or PIL Image objects).
-    - output_gif_path (str): Path to save the output GIF.
-    - duration_ms (int): Duration of each frame in milliseconds.
-
-    """
-    # Convert numpy arrays to PIL Images if needed
-    pil_frames = [Image.fromarray(frame) if isinstance(frame, np.ndarray) else frame for frame in frames]
-
-    pil_frames[0].save(
-        output_gif_path.replace(".mp4", ".gif"),
-        format="GIF",
-        append_images=pil_frames[1:],
-        save_all=True,
-        duration=500,
-        loop=0,
-    )
-
-
-def tensor_to_vae_latent(t, vae):
-    video_length = t.shape[1]
-
-    t = rearrange(t, "b f c h w -> (b f) c h w")
-    latents = vae.encode(t).latent_dist.sample()
-    latents = rearrange(latents, "(b f) c h w -> b f c h w", f=video_length)
-    latents = latents * vae.config.scaling_factor
-
-    return latents
-
-
-def parse_args():
-    parser = argparse.ArgumentParser(description="Script to train Stable Diffusion XL for InstructPix2Pix.")
-    parser.add_argument(
-        "--pretrained_model_name_or_path",
-        type=str,
-        default=None,
-        required=True,
-        help="Path to pretrained model or model identifier from huggingface.co/models.",
-    )
-    parser.add_argument(
-        "--revision",
-        type=str,
-        default=None,
-        required=False,
-        help="Revision of pretrained model identifier from huggingface.co/models.",
-    )
-
-    parser.add_argument(
-        "--num_frames",
-        type=int,
-        default=14,
-    )
-    parser.add_argument(
-        "--width",
-        type=int,
-        default=512,
-    )
-    parser.add_argument(
-        "--height",
-        type=int,
-        default=320,
-    )
-    parser.add_argument(
-        "--num_validation_images",
-        type=int,
-        default=1,
-        help="Number of images that should be generated during validation with `validation_prompt`.",
-    )
-    parser.add_argument(
-        "--validation_steps",
-        type=int,
-        default=500,
-        help=(
-            "Run fine-tuning validation every X epochs. The validation process consists of running the text/image prompt"
-            " multiple times: `args.num_validation_images`."
-        ),
-    )
-    parser.add_argument(
-        "--output_dir",
-        type=str,
-        default="./outputs",
-        help="The output directory where the model predictions and checkpoints will be written.",
-    )
-    parser.add_argument("--seed", type=int, default=None, help="A seed for reproducible training.")
-    parser.add_argument(
-        "--per_gpu_batch_size",
-        type=int,
-        default=1,
-        help="Batch size (per device) for the training dataloader.",
-    )
-    parser.add_argument("--num_train_epochs", type=int, default=100)
-    parser.add_argument(
-        "--max_train_steps",
-        type=int,
-        default=None,
-        help="Total number of training steps to perform.  If provided, overrides num_train_epochs.",
-    )
-    parser.add_argument(
-        "--gradient_accumulation_steps",
-        type=int,
-        default=1,
-        help="Number of updates steps to accumulate before performing a backward/update pass.",
-    )
-    parser.add_argument(
-        "--gradient_checkpointing",
-        action="store_true",
-        help="Whether or not to use gradient checkpointing to save memory at the expense of slower backward pass.",
-    )
-    parser.add_argument(
-        "--learning_rate",
-        type=float,
-        default=1e-4,
-        help="Initial learning rate (after the potential warmup period) to use.",
-    )
-    parser.add_argument(
-        "--scale_lr",
-        action="store_true",
-        default=False,
-        help="Scale the learning rate by the number of GPUs, gradient accumulation steps, and batch size.",
-    )
-    parser.add_argument(
-        "--lr_scheduler",
-        type=str,
-        default="constant",
-        help=(
-            'The scheduler type to use. Choose between ["linear", "cosine", "cosine_with_restarts", "polynomial",'
-            ' "constant", "constant_with_warmup"]'
-        ),
-    )
-    parser.add_argument(
-        "--lr_warmup_steps",
-        type=int,
-        default=500,
-        help="Number of steps for the warmup in the lr scheduler.",
-    )
-    parser.add_argument(
-        "--conditioning_dropout_prob",
-        type=float,
-        default=0.1,
-        help="Conditioning dropout probability. Drops out the conditionings (image and edit prompt) used in training InstructPix2Pix. See section 3.2.1 in the paper: https://arxiv.org/abs/2211.09800.",
-    )
-    parser.add_argument(
-        "--use_8bit_adam",
-        action="store_true",
-        help="Whether or not to use 8-bit Adam from bitsandbytes.",
-    )
-    parser.add_argument(
-        "--allow_tf32",
-        action="store_true",
-        help=(
-            "Whether or not to allow TF32 on Ampere GPUs. Can be used to speed up training. For more information, see"
-            " https://pytorch.org/docs/stable/notes/cuda.html#tensorfloat-32-tf32-on-ampere-devices"
-        ),
-    )
-    parser.add_argument("--use_ema", action="store_true", help="Whether to use EMA model.")
-    parser.add_argument(
-        "--non_ema_revision",
-        type=str,
-        default=None,
-        required=False,
-        help=(
-            "Revision of pretrained non-ema model identifier. Must be a branch, tag or git identifier of the local or"
-            " remote repository specified with --pretrained_model_name_or_path."
-        ),
-    )
-    parser.add_argument(
-        "--num_workers",
-        type=int,
-        default=8,
-        help=(
-            "Number of subprocesses to use for data loading. 0 means that the data will be loaded in the main process."
-        ),
-    )
-    parser.add_argument(
-        "--adam_beta1",
-        type=float,
-        default=0.9,
-        help="The beta1 parameter for the Adam optimizer.",
-    )
-    parser.add_argument(
-        "--adam_beta2",
-        type=float,
-        default=0.999,
-        help="The beta2 parameter for the Adam optimizer.",
-    )
-    parser.add_argument("--adam_weight_decay", type=float, default=1e-2, help="Weight decay to use.")
-    parser.add_argument(
-        "--adam_epsilon",
-        type=float,
-        default=1e-08,
-        help="Epsilon value for the Adam optimizer",
-    )
-    parser.add_argument("--max_grad_norm", default=1.0, type=float, help="Max gradient norm.")
-    parser.add_argument(
-        "--push_to_hub",
-        action="store_true",
-        help="Whether or not to push the model to the Hub.",
-    )
-    parser.add_argument(
-        "--hub_token",
-        type=str,
-        default=None,
-        help="The token to use to push to the Model Hub.",
-    )
-    parser.add_argument(
-        "--hub_model_id",
-        type=str,
-        default=None,
-        help="The name of the repository to keep in sync with the local `output_dir`.",
-    )
-    parser.add_argument(
-        "--logging_dir",
-        type=str,
-        default="logs",
-        help=(
-            "[TensorBoard](https://www.tensorflow.org/tensorboard) log directory. Will default to"
-            " *output_dir/runs/**CURRENT_DATETIME_HOSTNAME***."
-        ),
-    )
-    parser.add_argument(
-        "--mixed_precision",
-        type=str,
-        default=None,
-        choices=["no", "fp16", "bf16"],
-        help=(
-            "Whether to use mixed precision. Choose between fp16 and bf16 (bfloat16). Bf16 requires PyTorch >="
-            " 1.10.and an Nvidia Ampere GPU.  Default to the value of accelerate config of the current system or the"
-            " flag passed with the `accelerate.launch` command. Use this argument to override the accelerate config."
-        ),
-    )
-    parser.add_argument(
-        "--report_to",
-        type=str,
-        default="tensorboard",
-        help=(
-            'The integration to report the results and logs to. Supported platforms are `"tensorboard"`'
-            ' (default), `"wandb"` and `"comet_ml"`. Use `"all"` to report to all integrations.'
-        ),
-    )
-    parser.add_argument(
-        "--local_rank",
-        type=int,
-        default=-1,
-        help="For distributed training: local_rank",
-    )
-    parser.add_argument(
-        "--controlnet_model_name_or_path",
-        type=str,
-        default=None,
-        help="Path to pretrained controlnet model or model identifier from huggingface.co/models."
-        " If not specified controlnet weights are initialized from unet.",
-    )
-    parser.add_argument(
-        "--checkpointing_steps",
-        type=int,
-        default=500,
-        help=(
-            "Save a checkpoint of the training state every X updates. These checkpoints are only suitable for resuming"
-            " training using `--resume_from_checkpoint`."
-        ),
-    )
-    parser.add_argument(
-        "--checkpoints_total_limit",
-        type=int,
-        default=3,
-        help=("Max number of checkpoints to store."),
-    )
-    parser.add_argument(
-        "--resume_from_checkpoint",
-        type=str,
-        default=None,
-        help=(
-            "Whether training should be resumed from a previous checkpoint. Use a path saved by"
-            ' `--checkpointing_steps`, or `"latest"` to automatically select the last available checkpoint.'
-        ),
-    )
-    parser.add_argument(
-        "--enable_xformers_memory_efficient_attention",
-        action="store_true",
-        help="Whether or not to use xformers.",
-    )
-
-    parser.add_argument(
-        "--pretrain_unet",
-        type=str,
-        default=None,
-        help="use weight for unet block",
-    )
-    parser.add_argument(
-        "--rank",
-        type=int,
-        default=128,
-        help=("The dimension of the LoRA update matrices."),
-    )
-    parser.add_argument(
-        "--csv_path",
-        type=str,
-        default=None,
-        help=("path to the dataset csv"),
-    )
-    parser.add_argument(
-        "--video_folder",
-        type=str,
-        default=None,
-        help=("path to the video folder"),
-    )
-    parser.add_argument(
-        "--condition_folder",
-        type=str,
-        default=None,
-        help=("path to the depth folder"),
-    )
-    parser.add_argument(
-        "--motion_folder",
-        type=str,
-        default=None,
-        help=("path to the depth folder"),
-    )
-    parser.add_argument(
-        "--validation_prompt",
-        type=str,
-        default=None,
-        help=(
-            "A set of prompts evaluated every `--validation_steps` and logged to `--report_to`."
-            " Provide either a matching number of `--validation_image`s, a single `--validation_image`"
-            " to be used with all prompts, or a single prompt that will be used with all `--validation_image`s."
-        ),
-    )
-    parser.add_argument(
-        "--validation_image_folder",
-        type=str,
-        default=None,
-        help=(
-            "A set of paths to the controlnet conditioning image be evaluated every `--validation_steps`"
-            " and logged to `--report_to`. Provide either a matching number of `--validation_prompt`s, a"
-            " a single `--validation_prompt` to be used with all `--validation_image`s, or a single"
-            " `--validation_image` that will be used with all `--validation_prompt`s."
-        ),
-    )
-    parser.add_argument(
-        "--validation_control_folder",
-        type=str,
-        default=None,
-        help=("the validation control image"),
-    )
-
-    args = parser.parse_args()
-    env_local_rank = int(os.environ.get("LOCAL_RANK", -1))
-    if env_local_rank != -1 and env_local_rank != args.local_rank:
-        args.local_rank = env_local_rank
-
-    # default to using the same revision for the non-ema model if not specified
-    if args.non_ema_revision is None:
-        args.non_ema_revision = args.revision
-
-    return args
-
-
-def download_image(url):
-    original_image = (
-        lambda image_url_or_path: (
-            load_image(image_url_or_path)
-            if urlparse(image_url_or_path).scheme
-            else PIL.Image.open(image_url_or_path).convert("RGB")
-        )
-    )(url)
-    return original_image
-
-
-def main():
-    args = parse_args()
-
+def main(args):
     if args.non_ema_revision is not None:
         deprecate(
             "non_ema_revision!=None",
             "0.15.0",
-            message=(
+            (
                 "Downloading 'non_ema' weights from revision branches of the Hub is deprecated. Please make sure to"
                 " use `--variant=non_ema` instead."
             ),
         )
     logging_dir = os.path.join(args.output_dir, args.logging_dir)
     accelerator_project_config = ProjectConfiguration(project_dir=args.output_dir, logging_dir=logging_dir)
-    # ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
     accelerator = Accelerator(
         gradient_accumulation_steps=args.gradient_accumulation_steps,
         mixed_precision=args.mixed_precision,
-        #   log_with=args.report_to,
         project_config=accelerator_project_config,
-        # kwargs_handlers=[ddp_kwargs]
     )
 
     generator = torch.Generator(device=accelerator.device).manual_seed(23123134)
@@ -745,9 +78,7 @@ def main():
 
     # Make one log on every process with the configuration for debugging.
     logging.basicConfig(
-        format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
-        datefmt="%m/%d/%Y %H:%M:%S",
-        level=logging.INFO,
+        format="%(asctime)s - %(levelname)s - %(name)s - %(message)s", datefmt="%m/%d/%Y %H:%M:%S", level=logging.INFO
     )
     logger.info(accelerator.state, main_process_only=False)
     if accelerator.is_local_main_process:
@@ -772,7 +103,6 @@ def main():
             ).repo_id
 
     # Load scheduler, tokenizer and models.
-    noise_scheduler = EulerDiscreteScheduler.from_pretrained(args.pretrained_model_name_or_path, subfolder="scheduler")
     feature_extractor = CLIPImageProcessor.from_pretrained(
         args.pretrained_model_name_or_path, subfolder="feature_extractor", revision=args.revision
     )
@@ -812,7 +142,6 @@ def main():
     image_encoder.to(accelerator.device, dtype=weight_dtype)
     vae.to(accelerator.device, dtype=weight_dtype)
     unet.to(accelerator.device, dtype=weight_dtype)
-    # controlnet.to(accelerator.device, dtype=weight_dtype)
     # Create EMA for the unet.
     if args.use_ema:
         ema_controlnet = EMAModel(
@@ -895,21 +224,6 @@ def main():
         optimizer_cls = torch.optim.AdamW
 
     controlnet.requires_grad_(True)
-    parameters_list = []
-
-    # for name, para in unet.named_parameters():
-    #     if 'temporal_transformer_block' in name and 'down_blocks' in name:
-    #         parameters_list.append(para)
-    #         para.requires_grad = True
-    #     else:
-    #         para.requires_grad = False
-    # optimizer = optimizer_cls(
-    #     parameters_list,
-    #     lr=args.learning_rate,
-    #     betas=(args.adam_beta1, args.adam_beta2),
-    #     weight_decay=args.adam_weight_decay,
-    #     eps=args.adam_epsilon,
-    # )
 
     optimizer = optimizer_cls(
         controlnet.parameters(),
@@ -936,10 +250,7 @@ def main():
     train_dataset = make_train_dataset(args)
     sampler = RandomSampler(train_dataset, num_samples=100000)
     train_dataloader = torch.utils.data.DataLoader(
-        train_dataset,
-        sampler=sampler,
-        batch_size=args.per_gpu_batch_size,
-        num_workers=args.num_workers,
+        train_dataset, sampler=sampler, batch_size=args.per_gpu_batch_size, num_workers=args.num_workers
     )
 
     # Scheduler and math around the number of training steps.
@@ -1009,51 +320,6 @@ def main():
         image_embeddings = image_embeddings.unsqueeze(1)
         return image_embeddings
 
-    def _get_add_time_ids(
-        fps,
-        motion_bucket_ids,  # Expecting a list of tensor floats
-        noise_aug_strength,
-        dtype,
-        batch_size,
-        unet=None,
-        device=None,  # Add a device parameter
-    ):
-        # Determine the target device
-        target_device = device if device is not None else "cpu"
-
-        # Ensure motion_bucket_ids is a tensor and on the target device
-        if not isinstance(motion_bucket_ids, torch.Tensor):
-            motion_bucket_ids = torch.tensor(motion_bucket_ids, dtype=dtype, device=target_device)
-        else:
-            motion_bucket_ids = motion_bucket_ids.to(device=target_device)
-
-        # Reshape motion_bucket_ids if necessary
-        if motion_bucket_ids.dim() == 1:
-            motion_bucket_ids = motion_bucket_ids.view(-1, 1)
-
-        # Check for batch size consistency
-        if motion_bucket_ids.size(0) != batch_size:
-            raise ValueError("The length of motion_bucket_ids must match the batch_size.")
-
-        # Create fps and noise_aug_strength tensors on the target device
-        add_time_ids = torch.tensor([fps, noise_aug_strength], dtype=dtype, device=target_device).repeat(batch_size, 1)
-
-        # Concatenate with motion_bucket_ids
-        add_time_ids = torch.cat([add_time_ids, motion_bucket_ids], dim=1)
-
-        # Checking the dimensions of the added time embedding
-        passed_add_embed_dim = unet.config.addition_time_embed_dim * add_time_ids.size(1)
-        expected_add_embed_dim = unet.add_embedding.linear_1.in_features
-
-        if expected_add_embed_dim != passed_add_embed_dim:
-            raise ValueError(
-                f"Model expects an added time embedding vector of length {expected_add_embed_dim}, "
-                f"but a vector of {passed_add_embed_dim} was created. The model has an incorrect config. "
-                "Please check `unet.config.time_embedding_type` and `text_encoder_2.config.projection_dim`."
-            )
-
-        return add_time_ids
-
     # Potentially load in the weights and states from a previous save
     if args.resume_from_checkpoint:
         if args.resume_from_checkpoint != "latest":
@@ -1104,17 +370,13 @@ def main():
                 # So, first, convert images to latent space.
                 pixel_values = batch["pixel_values"].to(weight_dtype).to(accelerator.device, non_blocking=True)
                 latents = tensor_to_vae_latent(pixel_values, vae)
-                # conditional_latents = latents[:, 0, :, :, :]
-                # conditional_latents = conditional_latents / vae.config.scaling_factor
 
                 # Sample noise that we'll add to the latents
                 noise = torch.randn_like(latents)
                 bsz = latents.shape[0]
                 # Sample a random timestep for each image
                 sigmas = rand_cosine_interpolated(
-                    shape=[
-                        bsz,
-                    ],
+                    shape=[bsz],
                     image_d=image_d,
                     noise_d_low=noise_d_low,
                     noise_d_high=noise_d_high,
@@ -1177,15 +439,6 @@ def main():
                 conditional_latents = conditional_latents.unsqueeze(1).repeat(1, noisy_latents.shape[1], 1, 1, 1)
                 inp_noisy_latents = torch.cat([inp_noisy_latents, conditional_latents], dim=2)
                 controlnet_image = batch["depth_pixel_values"]
-                # Get the target for loss depending on the prediction type
-                # if noise_scheduler.config.prediction_type == "epsilon":
-                #     target = latents  # we are computing loss against denoise latents
-                # elif noise_scheduler.config.prediction_type == "v_prediction":
-                #     target = noise_scheduler.get_velocity(
-                #         latents, noise, timesteps)
-                # else:
-                #     raise ValueError(
-                #         f"Unknown prediction type {noise_scheduler.config.prediction_type}")
 
                 target = latents
                 down_block_res_samples, mid_block_res_sample = controlnet(
@@ -1229,8 +482,6 @@ def main():
 
                 # Backpropagate
                 accelerator.backward(loss)
-                # if accelerator.sync_gradients:
-                #     accelerator.clip_grad_norm_(unet.parameters(), args.max_grad_norm)
                 optimizer.step()
                 lr_scheduler.step()
                 optimizer.zero_grad()
@@ -1319,14 +570,6 @@ def main():
                                     # generator=generator,
                                 ).frames
 
-                                out_file = os.path.join(
-                                    val_save_dir,
-                                    f"step_{global_step}_val_img_{val_img_idx}.mp4",
-                                )
-
-                                # for i in range(num_frames):
-                                #    img = video_frames[i]
-                                #    video_frames[i] = np.array(img)
                                 save_combined_frames(
                                     video_frames, validation_images, validation_control_images, val_save_dir
                                 )
@@ -1351,8 +594,6 @@ def main():
                                     combined_frames, caption=f"step_{global_step}_val_img_{val_img_idx}.mp4"
                                 )
                                 wandb.log({"val_image": images})
-
-                                # export_to_gif(video_frames, out_file, 8)
 
                         if args.use_ema:
                             # Switch back to the original UNet parameters.
@@ -1395,4 +636,237 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(description="Script to train Stable Diffusion XL for InstructPix2Pix.")
+    parser.add_argument(
+        "--pretrained_model_name_or_path",
+        type=str,
+        default=None,
+        required=True,
+        help="Path to pretrained model or model identifier from huggingface.co/models.",
+    )
+    parser.add_argument(
+        "--revision",
+        type=str,
+        default=None,
+        required=False,
+        help="Revision of pretrained model identifier from huggingface.co/models.",
+    )
+
+    parser.add_argument("--num_frames", type=int, default=14)
+    parser.add_argument("--width", type=int, default=512)
+    parser.add_argument("--height", type=int, default=320)
+    parser.add_argument(
+        "--num_validation_images",
+        type=int,
+        default=1,
+        help="Number of images that should be generated during validation with `validation_prompt`.",
+    )
+    parser.add_argument(
+        "--validation_steps",
+        type=int,
+        default=500,
+        help=(
+            "Run fine-tuning validation every X epochs. The validation process consists of running the text/image prompt"
+            " multiple times: `args.num_validation_images`."
+        ),
+    )
+    parser.add_argument(
+        "--output_dir",
+        type=str,
+        default="./outputs",
+        help="The output directory where the model predictions and checkpoints will be written.",
+    )
+    parser.add_argument("--seed", type=int, default=None, help="A seed for reproducible training.")
+    parser.add_argument(
+        "--per_gpu_batch_size", type=int, default=1, help="Batch size (per device) for the training dataloader."
+    )
+    parser.add_argument("--num_train_epochs", type=int, default=100)
+    parser.add_argument(
+        "--max_train_steps",
+        type=int,
+        default=None,
+        help="Total number of training steps to perform.  If provided, overrides num_train_epochs.",
+    )
+    parser.add_argument(
+        "--gradient_accumulation_steps",
+        type=int,
+        default=1,
+        help="Number of updates steps to accumulate before performing a backward/update pass.",
+    )
+    parser.add_argument(
+        "--gradient_checkpointing",
+        action="store_true",
+        help="Whether or not to use gradient checkpointing to save memory at the expense of slower backward pass.",
+    )
+    parser.add_argument(
+        "--learning_rate",
+        type=float,
+        default=1e-4,
+        help="Initial learning rate (after the potential warmup period) to use.",
+    )
+    parser.add_argument(
+        "--scale_lr",
+        action="store_true",
+        default=False,
+        help="Scale the learning rate by the number of GPUs, gradient accumulation steps, and batch size.",
+    )
+    parser.add_argument(
+        "--lr_scheduler",
+        type=str,
+        default="constant",
+        help=(
+            'The scheduler type to use. Choose between ["linear", "cosine", "cosine_with_restarts", "polynomial",'
+            ' "constant", "constant_with_warmup"]'
+        ),
+    )
+    parser.add_argument(
+        "--lr_warmup_steps", type=int, default=500, help="Number of steps for the warmup in the lr scheduler."
+    )
+    parser.add_argument(
+        "--conditioning_dropout_prob",
+        type=float,
+        default=0.1,
+        help="Conditioning dropout probability. Drops out the conditionings (image and edit prompt) used in training InstructPix2Pix. See section 3.2.1 in the paper: https://arxiv.org/abs/2211.09800.",
+    )
+    parser.add_argument(
+        "--use_8bit_adam", action="store_true", help="Whether or not to use 8-bit Adam from bitsandbytes."
+    )
+    parser.add_argument(
+        "--allow_tf32",
+        action="store_true",
+        help=(
+            "Whether or not to allow TF32 on Ampere GPUs. Can be used to speed up training. For more information, see"
+            " https://pytorch.org/docs/stable/notes/cuda.html#tensorfloat-32-tf32-on-ampere-devices"
+        ),
+    )
+    parser.add_argument("--use_ema", action="store_true", help="Whether to use EMA model.")
+    parser.add_argument(
+        "--non_ema_revision",
+        type=str,
+        default=None,
+        required=False,
+        help=(
+            "Revision of pretrained non-ema model identifier. Must be a branch, tag or git identifier of the local or"
+            " remote repository specified with --pretrained_model_name_or_path."
+        ),
+    )
+    parser.add_argument(
+        "--num_workers",
+        type=int,
+        default=8,
+        help=(
+            "Number of subprocesses to use for data loading. 0 means that the data will be loaded in the main process."
+        ),
+    )
+    parser.add_argument("--adam_beta1", type=float, default=0.9, help="The beta1 parameter for the Adam optimizer.")
+    parser.add_argument("--adam_beta2", type=float, default=0.999, help="The beta2 parameter for the Adam optimizer.")
+    parser.add_argument("--adam_weight_decay", type=float, default=1e-2, help="Weight decay to use.")
+    parser.add_argument("--adam_epsilon", type=float, default=1e-08, help="Epsilon value for the Adam optimizer")
+    parser.add_argument("--max_grad_norm", default=1.0, type=float, help="Max gradient norm.")
+    parser.add_argument("--push_to_hub", action="store_true", help="Whether or not to push the model to the Hub.")
+    parser.add_argument("--hub_token", type=str, default=None, help="The token to use to push to the Model Hub.")
+    parser.add_argument(
+        "--hub_model_id",
+        type=str,
+        default=None,
+        help="The name of the repository to keep in sync with the local `output_dir`.",
+    )
+    parser.add_argument(
+        "--logging_dir",
+        type=str,
+        default="logs",
+        help=(
+            "[TensorBoard](https://www.tensorflow.org/tensorboard) log directory. Will default to"
+            " *output_dir/runs/**CURRENT_DATETIME_HOSTNAME***."
+        ),
+    )
+    parser.add_argument(
+        "--mixed_precision",
+        type=str,
+        default=None,
+        choices=["no", "fp16", "bf16"],
+        help=(
+            "Whether to use mixed precision. Choose between fp16 and bf16 (bfloat16). Bf16 requires PyTorch >="
+            " 1.10.and an Nvidia Ampere GPU.  Default to the value of accelerate config of the current system or the"
+            " flag passed with the `accelerate.launch` command. Use this argument to override the accelerate config."
+        ),
+    )
+    parser.add_argument(
+        "--report_to",
+        type=str,
+        default="tensorboard",
+        help=(
+            'The integration to report the results and logs to. Supported platforms are `"tensorboard"`'
+            ' (default), `"wandb"` and `"comet_ml"`. Use `"all"` to report to all integrations.'
+        ),
+    )
+    parser.add_argument("--local_rank", type=int, default=-1, help="For distributed training: local_rank")
+    parser.add_argument(
+        "--controlnet_model_name_or_path",
+        type=str,
+        default=None,
+        help="Path to pretrained controlnet model or model identifier from huggingface.co/models."
+        " If not specified controlnet weights are initialized from unet.",
+    )
+    parser.add_argument(
+        "--checkpointing_steps",
+        type=int,
+        default=500,
+        help=(
+            "Save a checkpoint of the training state every X updates. These checkpoints are only suitable for resuming"
+            " training using `--resume_from_checkpoint`."
+        ),
+    )
+    parser.add_argument("--checkpoints_total_limit", type=int, default=3, help=("Max number of checkpoints to store."))
+    parser.add_argument(
+        "--resume_from_checkpoint",
+        type=str,
+        default=None,
+        help=(
+            "Whether training should be resumed from a previous checkpoint. Use a path saved by"
+            ' `--checkpointing_steps`, or `"latest"` to automatically select the last available checkpoint.'
+        ),
+    )
+    parser.add_argument(
+        "--enable_xformers_memory_efficient_attention", action="store_true", help="Whether or not to use xformers."
+    )
+
+    parser.add_argument("--pretrain_unet", type=str, default=None, help="use weight for unet block")
+    parser.add_argument("--rank", type=int, default=128, help=("The dimension of the LoRA update matrices."))
+    parser.add_argument("--csv_path", type=str, default=None, help=("path to the dataset csv"))
+    parser.add_argument("--video_folder", type=str, default=None, help=("path to the video folder"))
+    parser.add_argument("--condition_folder", type=str, default=None, help=("path to the depth folder"))
+    parser.add_argument("--motion_folder", type=str, default=None, help=("path to the depth folder"))
+    parser.add_argument(
+        "--validation_prompt",
+        type=str,
+        default=None,
+        help=(
+            "A set of prompts evaluated every `--validation_steps` and logged to `--report_to`."
+            " Provide either a matching number of `--validation_image`s, a single `--validation_image`"
+            " to be used with all prompts, or a single prompt that will be used with all `--validation_image`s."
+        ),
+    )
+    parser.add_argument(
+        "--validation_image_folder",
+        type=str,
+        default=None,
+        help=(
+            "A set of paths to the controlnet conditioning image be evaluated every `--validation_steps`"
+            " and logged to `--report_to`. Provide either a matching number of `--validation_prompt`s, a"
+            " a single `--validation_prompt` to be used with all `--validation_image`s, or a single"
+            " `--validation_image` that will be used with all `--validation_prompt`s."
+        ),
+    )
+    parser.add_argument("--validation_control_folder", type=str, default=None, help=("the validation control image"))
+
+    args = parser.parse_args()
+    env_local_rank = int(os.environ.get("LOCAL_RANK", -1))
+    if env_local_rank != -1 and env_local_rank != args.local_rank:
+        args.local_rank = env_local_rank
+
+    # default to using the same revision for the non-ema model if not specified
+    if args.non_ema_revision is None:
+        args.non_ema_revision = args.revision
+
+    main(args)

@@ -122,12 +122,7 @@ class UNetSpatioTemporalConditionControlNetModel(ModelMixin, ConfigMixin, UNet2D
             )
 
         # input
-        self.conv_in = nn.Conv2d(
-            in_channels,
-            block_out_channels[0],
-            kernel_size=3,
-            padding=1,
-        )
+        self.conv_in = nn.Conv2d(in_channels, block_out_channels[0], kernel_size=3, padding=1)
 
         # time
         time_embed_dim = block_out_channels[0] * 4
@@ -235,12 +230,7 @@ class UNetSpatioTemporalConditionControlNetModel(ModelMixin, ConfigMixin, UNet2D
         self.conv_norm_out = nn.GroupNorm(num_channels=block_out_channels[0], num_groups=32, eps=1e-5)
         self.conv_act = nn.SiLU()
 
-        self.conv_out = nn.Conv2d(
-            block_out_channels[0],
-            out_channels,
-            kernel_size=3,
-            padding=1,
-        )
+        self.conv_out = nn.Conv2d(block_out_channels[0], out_channels, kernel_size=3, padding=1)
 
     @property
     def attn_processors(self) -> Dict[str, AttentionProcessor]:
@@ -252,11 +242,7 @@ class UNetSpatioTemporalConditionControlNetModel(ModelMixin, ConfigMixin, UNet2D
         # set recursively
         processors = {}
 
-        def fn_recursive_add_processors(
-            name: str,
-            module: torch.nn.Module,
-            processors: Dict[str, AttentionProcessor],
-        ):
+        def fn_recursive_add_processors(name: str, module: torch.nn.Module, processors: Dict[str, AttentionProcessor]):
             if hasattr(module, "get_processor"):
                 processors[f"{name}.processor"] = module.get_processor(return_deprecated_lora=True)
 
@@ -439,9 +425,7 @@ class UNetSpatioTemporalConditionControlNetModel(ModelMixin, ConfigMixin, UNet2D
                 )
             else:
                 sample, res_samples = downsample_block(
-                    hidden_states=sample,
-                    temb=emb,
-                    image_only_indicator=image_only_indicator,
+                    hidden_states=sample, temb=emb, image_only_indicator=image_only_indicator
                 )
 
             down_block_res_samples += res_samples

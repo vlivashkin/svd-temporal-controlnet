@@ -36,14 +36,7 @@ from utils.scheduling_euler_discrete_karras_fix import EulerDiscreteScheduler
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
 
 
-def _get_add_time_ids(
-    noise_aug_strength,
-    dtype,
-    batch_size,
-    fps=4,
-    motion_bucket_id=128,
-    unet=None,
-):
+def _get_add_time_ids(noise_aug_strength, dtype, batch_size, fps=4, motion_bucket_id=128, unet=None):
     add_time_ids = [fps, motion_bucket_id, noise_aug_strength]
 
     passed_add_embed_dim = unet.config.addition_time_embed_dim * len(add_time_ids)
@@ -55,7 +48,6 @@ def _get_add_time_ids(
         )
 
     add_time_ids = torch.tensor([add_time_ids], dtype=dtype)
-    # add_time_ids = add_time_ids.repeat(batch_size * num_videos_per_prompt, 1)
 
     return add_time_ids
 
@@ -172,13 +164,7 @@ class StableVideoDiffusionPipelineControlNet(DiffusionPipeline):
 
         return image_embeddings
 
-    def _encode_vae_image(
-        self,
-        image: torch.Tensor,
-        device,
-        num_videos_per_prompt,
-        do_classifier_free_guidance,
-    ):
+    def _encode_vae_image(self, image: torch.Tensor, device, num_videos_per_prompt, do_classifier_free_guidance):
         image = image.to(device=device)
         image_latents = self.vae.encode(image).latent_dist.mode()
 
@@ -266,16 +252,7 @@ class StableVideoDiffusionPipelineControlNet(DiffusionPipeline):
             raise ValueError(f"`height` and `width` have to be divisible by 8 but are {height} and {width}.")
 
     def prepare_latents(
-        self,
-        batch_size,
-        num_frames,
-        num_channels_latents,
-        height,
-        width,
-        dtype,
-        device,
-        generator,
-        latents=None,
+        self, batch_size, num_frames, num_channels_latents, height, width, dtype, device, generator, latents=None
     ):
         shape = (
             batch_size,
@@ -426,12 +403,6 @@ class StableVideoDiffusionPipelineControlNet(DiffusionPipeline):
         self.check_inputs(image, height, width)
 
         # 2. Define call parameters
-        # if isinstance(image, PIL.Image.Image):
-        #    batch_size = 1
-        # elif isinstance(image, list):
-        #    batch_size = len(image)
-        # else:
-        #    batch_size = image.shape[0]
         device = self._execution_device
         # here `guidance_scale` is defined analog to the guidance weight `w` of equation (2)
         # of the Imagen paper: https://arxiv.org/pdf/2205.11487.pdf . `guidance_scale = 1`
@@ -465,7 +436,6 @@ class StableVideoDiffusionPipelineControlNet(DiffusionPipeline):
         # Repeat the image latents for each frame so we can concatenate them with the noise
         # image_latents [batch, channels, height, width] ->[batch, num_frames, channels, height, width]
         image_latents = image_latents.unsqueeze(1).repeat(1, num_frames, 1, 1, 1)
-        # image_latents = torch.cat([image_latents] * 2) if do_classifier_free_guidance else image_latents
 
         # 5. Get Added Time IDs
         added_time_ids = self._get_add_time_ids(
@@ -513,12 +483,7 @@ class StableVideoDiffusionPipelineControlNet(DiffusionPipeline):
 
         noise_aug_strength = 0.02  # "¯\_(ツ)_/¯
         added_time_ids = _get_add_time_ids(
-            noise_aug_strength,
-            image_embeddings.dtype,
-            batch_size,
-            6,
-            128,
-            unet=self.unet,
+            noise_aug_strength, image_embeddings.dtype, batch_size, 6, 128, unet=self.unet
         )
         added_time_ids = torch.cat([added_time_ids] * 2)
         added_time_ids = added_time_ids.to(latents.device)
@@ -604,10 +569,7 @@ def _resize_with_antialiasing(input, size, interpolation="bicubic", align_corner
 
     # First, we have to determine sigma
     # Taken from skimage: https://github.com/scikit-image/scikit-image/blob/v0.19.2/skimage/transform/_warps.py#L171
-    sigmas = (
-        max((factors[0] - 1.0) / 2.0, 0.001),
-        max((factors[1] - 1.0) / 2.0, 0.001),
-    )
+    sigmas = (max((factors[0] - 1.0) / 2.0, 0.001), max((factors[1] - 1.0) / 2.0, 0.001))
 
     # Now kernel size. Good results are for 3 sigma, but that is kind of slow. Pillow uses 1 sigma
     # https://github.com/python-pillow/Pillow/blob/master/src/libImaging/Resample.c#L206

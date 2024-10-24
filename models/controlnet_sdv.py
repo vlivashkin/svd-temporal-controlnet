@@ -25,15 +25,9 @@ from diffusers.models.attention_processor import (
     AttnAddedKVProcessor,
     AttnProcessor,
 )
-from diffusers.models.embeddings import (
-    TimestepEmbedding,
-    Timesteps,
-)
+from diffusers.models.embeddings import TimestepEmbedding, Timesteps
 from diffusers.models.modeling_utils import ModelMixin
-from diffusers.models.unet_3d_blocks import (
-    get_down_block,
-    UNetMidBlockSpatioTemporal,
-)
+from diffusers.models.unet_3d_blocks import get_down_block, UNetMidBlockSpatioTemporal
 from diffusers.utils import BaseOutput, logging
 from torch import nn
 from torch.nn import functional as F
@@ -107,12 +101,6 @@ class ControlNetConditioningEmbeddingSVD(nn.Module):
             embedding = F.silu(embedding)
 
         embedding = self.conv_out(embedding)
-
-        # split them apart again
-        # actually not needed
-        # new_channels, new_height, new_width = embedding.shape[1], embedding.shape[2], embedding.shape[3]
-        # embedding = embedding.view(batch_size, frames, new_channels, new_height, new_width)
-
         return embedding
 
 
@@ -214,12 +202,7 @@ class ControlNetSDVModel(ModelMixin, ConfigMixin, FromOriginalControlnetMixin):
             )
 
         # input
-        self.conv_in = nn.Conv2d(
-            in_channels,
-            block_out_channels[0],
-            kernel_size=3,
-            padding=1,
-        )
+        self.conv_in = nn.Conv2d(in_channels, block_out_channels[0], kernel_size=3, padding=1)
 
         # time
         time_embed_dim = block_out_channels[0] * 4
@@ -304,17 +287,6 @@ class ControlNetSDVModel(ModelMixin, ConfigMixin, FromOriginalControlnetMixin):
             num_attention_heads=num_attention_heads[-1],
         )
 
-        # out
-        # self.conv_norm_out = nn.GroupNorm(num_channels=block_out_channels[0], num_groups=32, eps=1e-5)
-        # self.conv_act = nn.SiLU()
-
-        # self.conv_out = nn.Conv2d(
-        #    block_out_channels[0],
-        #    out_channels,
-        #    kernel_size=3,
-        #    padding=1,
-        # )
-
     @property
     def attn_processors(self) -> Dict[str, AttentionProcessor]:
         r"""
@@ -325,11 +297,7 @@ class ControlNetSDVModel(ModelMixin, ConfigMixin, FromOriginalControlnetMixin):
         # set recursively
         processors = {}
 
-        def fn_recursive_add_processors(
-            name: str,
-            module: torch.nn.Module,
-            processors: Dict[str, AttentionProcessor],
-        ):
+        def fn_recursive_add_processors(name: str, module: torch.nn.Module, processors: Dict[str, AttentionProcessor]):
             if hasattr(module, "get_processor"):
                 processors[f"{name}.processor"] = module.get_processor(return_deprecated_lora=True)
 
@@ -519,9 +487,7 @@ class ControlNetSDVModel(ModelMixin, ConfigMixin, FromOriginalControlnetMixin):
                 )
             else:
                 sample, res_samples = downsample_block(
-                    hidden_states=sample,
-                    temb=emb,
-                    image_only_indicator=image_only_indicator,
+                    hidden_states=sample, temb=emb, image_only_indicator=image_only_indicator
                 )
 
             down_block_res_samples += res_samples
@@ -550,7 +516,7 @@ class ControlNetSDVModel(ModelMixin, ConfigMixin, FromOriginalControlnetMixin):
         mid_block_res_sample = mid_block_res_sample * conditioning_scale
 
         if not return_dict:
-            return (down_block_res_samples, mid_block_res_sample)
+            return down_block_res_samples, mid_block_res_sample
 
         return ControlNetOutput(
             down_block_res_samples=down_block_res_samples, mid_block_res_sample=mid_block_res_sample
@@ -573,16 +539,6 @@ class ControlNetSDVModel(ModelMixin, ConfigMixin, FromOriginalControlnetMixin):
                 The UNet model weights to copy to the [`ControlNetModel`]. All configuration options are also copied
                 where applicable.
         """
-
-        transformer_layers_per_block = (
-            unet.config.transformer_layers_per_block if "transformer_layers_per_block" in unet.config else 1
-        )
-        encoder_hid_dim = unet.config.encoder_hid_dim if "encoder_hid_dim" in unet.config else None
-        encoder_hid_dim_type = unet.config.encoder_hid_dim_type if "encoder_hid_dim_type" in unet.config else None
-        addition_embed_type = unet.config.addition_embed_type if "addition_embed_type" in unet.config else None
-        addition_time_embed_dim = (
-            unet.config.addition_time_embed_dim if "addition_time_embed_dim" in unet.config else None
-        )
         print(unet.config)
         controlnet = cls(
             in_channels=unet.config.in_channels,
@@ -605,9 +561,6 @@ class ControlNetSDVModel(ModelMixin, ConfigMixin, FromOriginalControlnetMixin):
             controlnet.conv_in.load_state_dict(unet.conv_in.state_dict())
             controlnet.time_proj.load_state_dict(unet.time_proj.state_dict())
             controlnet.time_embedding.load_state_dict(unet.time_embedding.state_dict())
-
-            # if controlnet.class_embedding:
-            #     controlnet.class_embedding.load_state_dict(unet.class_embedding.state_dict())
 
             controlnet.down_blocks.load_state_dict(unet.down_blocks.state_dict())
             controlnet.mid_block.load_state_dict(unet.mid_block.state_dict())
@@ -757,11 +710,6 @@ class ControlNetSDVModel(ModelMixin, ConfigMixin, FromOriginalControlnetMixin):
         reversed_slice_size = list(reversed(slice_size))
         for module in self.children():
             fn_recursive_set_attention_slice(module, reversed_slice_size)
-
-
-#   def _set_gradient_checkpointing(self, module, value: bool = False) -> None:
-#       if isinstance(module, (CrossAttnDownBlock2D, DownBlock2D)):
-#          module.gradient_checkpointing = value
 
 
 def zero_module(module):

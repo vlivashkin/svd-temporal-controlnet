@@ -26,16 +26,7 @@ def numpy_to_pt(images: np.ndarray) -> torch.FloatTensor:
 
 
 class WebVid10M(Dataset):
-    def __init__(
-        self,
-        csv_path,
-        video_folder,
-        depth_folder,
-        _,
-        sample_size=256,
-        sample_stride=4,
-        sample_n_frames=14,
-    ):
+    def __init__(self, csv_path, video_folder, depth_folder, _, sample_size=256, sample_stride=4, sample_n_frames=14):
         with open(csv_path) as f:
             self.dataset = json.load(f)
         self.length = len(self.dataset)
@@ -95,17 +86,8 @@ class WebVid10M(Dataset):
         return self.length
 
     def __getitem__(self, idx):
-
-        # while True:
-        # try:
         pixel_values, depth_pixel_values, motion_values = self.get_batch(idx)
-        #     break
-        #  except Exception as e:
-        #      print(e)
-        #      idx = random.randint(0, self.length - 1)
-
         pixel_values = self.pixel_transforms(pixel_values)
-        # print(depth_pixel_values.shape)
         depth_pixel_values = depth_pixel_values[:, :, ::2, ::2]  # FIXME: for 256x256
         sample = dict(pixel_values=pixel_values, depth_pixel_values=depth_pixel_values, motion_values=motion_values)
         return sample

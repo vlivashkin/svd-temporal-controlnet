@@ -46,11 +46,7 @@ class EulerDiscreteSchedulerOutput(BaseOutput):
 
 
 # Copied from diffusers.schedulers.scheduling_ddpm.betas_for_alpha_bar
-def betas_for_alpha_bar(
-    num_diffusion_timesteps,
-    max_beta=0.999,
-    alpha_transform_type="cosine",
-):
+def betas_for_alpha_bar(num_diffusion_timesteps, max_beta=0.999, alpha_transform_type="cosine"):
     """
     Create a beta schedule that discretizes the given alpha_t_bar function, which defines the cumulative product of
     (1-beta) over time from t = [0,1].
@@ -458,7 +454,7 @@ class EulerDiscreteScheduler(SchedulerMixin, ConfigMixin):
                     "Passing integer indices (e.g. from `enumerate(timesteps)`) as timesteps to"
                     " `EulerDiscreteScheduler.step()` is not supported. Make sure to pass"
                     " one of the `scheduler.timesteps` as a timestep."
-                ),
+                )
             )
 
         if not self.is_scale_input_called:
@@ -521,10 +517,7 @@ class EulerDiscreteScheduler(SchedulerMixin, ConfigMixin):
         return EulerDiscreteSchedulerOutput(prev_sample=prev_sample, pred_original_sample=pred_original_sample)
 
     def add_noise(
-        self,
-        original_samples: torch.FloatTensor,
-        noise: torch.FloatTensor,
-        timesteps: torch.FloatTensor,
+        self, original_samples: torch.FloatTensor, noise: torch.FloatTensor, timesteps: torch.FloatTensor
     ) -> torch.FloatTensor:
         # Make sure sigmas and timesteps have the same device and dtype as original_samples
         sigmas = self.sigmas.to(device=original_samples.device, dtype=original_samples.dtype)

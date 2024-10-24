@@ -285,12 +285,11 @@ if __name__ == "__main__":
 
     # Load validation images and control images
     validation_images = load_images_from_folder_to_pil(args["validation_image_folder"])
-    # validation_images = convert_list_bgra_to_rgba(validation_images)
     validation_control_images = load_images_from_folder_to_pil(args["validation_control_folder"])
     validation_image = Image.open(args["validation_image"]).convert("RGB")
 
     # Load and set up the pipeline
-    controlnet = controlnet = ControlNetSDVModel.from_pretrained(
+    controlnet = ControlNetSDVModel.from_pretrained(
         "CiaraRowles/temporal-controlnet-depth-svd-v1", subfolder="controlnet"
     )
     unet = UNetSpatioTemporalConditionControlNetModel.from_pretrained(
@@ -301,13 +300,11 @@ if __name__ == "__main__":
     )
     pipeline.enable_model_cpu_offload()
     # Additional pipeline configurations can be added here
-    # pipeline.enable_xformers_memory_efficient_attention()
     # Create output directory if it doesn't exist
     val_save_dir = os.path.join(args["output_dir"], "validation_images")
     os.makedirs(val_save_dir, exist_ok=True)
 
     # Inference and saving loop
-    # print(validation_control_images.shape)
     video_frames = pipeline(
         validation_image,
         validation_control_images[:14],
