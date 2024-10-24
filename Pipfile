@@ -1,0 +1,28 @@
+[[source]]
+url = "https://pypi.org/simple"
+verify_ssl = true
+name = "pypi"
+
+[[source]]
+url = "https://download.pytorch.org/whl/cu121"
+verify_ssl = true
+name = "downloadpytorch"
+
+[packages]
+#diffusers = "0.24.0"
+#huggingface_hub = "0.25.2"
+#transformers = "*"
+#accelerate = "*"
+einops = "*"
+opencv-python = "*"
+#decord = "*"
+imageio = "*"
+#xformers = "*"
+#torch = { version = "*", index = "downloadpytorch" }
+#torchvision = { version = "*", index = "downloadpytorch" }
+
+[dev-packages]
+black = "*"
+
+[requires]
+python_version = "3.12"
